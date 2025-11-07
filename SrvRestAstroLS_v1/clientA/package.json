@@ -1,0 +1,26 @@
+{
+  "name": "clienta",
+  "type": "module",
+  "version": "0.0.1",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "astro": "astro"
+  },
+  "dependencies": {
+    "@ag-ui/client": "^0.0.39",
+    "@ag-ui/core": "^0.0.39",
+    "@tailwindcss/vite": "^4.1.16",
+    "astro": "^5.15.3"
+  },
+  "devDependencies": {
+    "@astrojs/svelte": "^7.2.1",
+    "@astrojs/tailwind": "^6.0.2",
+    "autoprefixer": "^10.4.21",
+    "daisyui": "^5.4.4",
+    "postcss": "^8.5.6",
+    "svelte": "^5.43.3",
+    "tailwindcss": "^4.1.16"
+  }
+}

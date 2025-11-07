@@ -1,0 +1,141 @@
+---
+// Layout.astro
+import "../styles/global.css";
+
+interface Props {
+  title: string;
+  theme_daisyui: string;
+  metaDescription?: string;
+  canonicalUrl?: string;
+}
+
+const {
+  title,
+  theme_daisyui,
+  metaDescription = "Descubre el universo interior de la mística judía con tutor AI. Curso online basado en Aryeh Kaplan. ¡Certificado incluido!",
+  canonicalUrl
+} = Astro.props;
+
+// Construimos el JSON-LD como objeto JS y luego lo serializamos:
+const courseJsonLd = {
+  "@context": "https://schema.org",
+  "@type": "Course",
+  "name": "Mística Judía: Universo Interior",
+  "description": metaDescription,
+  "provider": {
+    "@type": "Organization",
+    "name": "JudaismoEnVivo",
+    "sameAs": "https://judaismoenvivo.com"
+  },
+  "offers": {
+    "@type": "Offer",
+    "price": "79",
+    "priceCurrency": "USD"
+  }
+};
+
+const pageUrl = canonicalUrl ?? Astro.url.href;
+---
+
+<!DOCTYPE html>
+<html lang="es" data-theme={theme_daisyui}>
+  <head>
+    <!-- Básico -->
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title} | JudaismoEnVivo</title>
+    <meta name="description" content={metaDescription} />
+
+    <!-- Canonical -->
+    {canonicalUrl && <link rel="canonical" href={canonicalUrl} />}
+
+    <!-- Favicons -->
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+
+    <!-- Open Graph -->
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={metaDescription} />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content={pageUrl} />
+    <meta property="og:image" content="https://judaismoenvivo.com/assets/universo-interior-social.jpg" />
+    <meta property="og:locale" content="es_ES" />
+
+    <!-- Twitter -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={metaDescription} />
+
+    <!-- Google Ads / Analytics -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=AW-123456789"></script>
+    <script is:inline>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){ dataLayer.push(arguments); }
+      gtag('js', new Date());
+      gtag('config', 'AW-123456789');  // Ads
+      gtag('config', 'G-G7844VZX8S');  // Analytics
+    </script>
+
+    <!-- Meta Pixel -->
+    <script is:inline>
+      !function(f,b,e,v,n,t,s){
+        if(f.fbq)return;n=f.fbq=function(){n.callMethod?
+        n.callMethod.apply(n,arguments):n.queue.push(arguments)};
+        if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';
+        n.queue=[];t=b.createElement(e);t.async=!0;t.src=v;
+        s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)
+      }(window,document,'script','https://connect.facebook.net/en_US/fbevents.js');
+      fbq('init', '1367865940959690');
+      fbq('track', 'PageView');
+      fbq('trackCustom', 'ViewCourse', {
+        course_name: 'Universo Interior',
+        content_type: 'product'
+      });
+    </script>
+    <noscript>
+      <img height="1" width="1" style="display:none"
+           src="https://www.facebook.com/tr?id=1367865940959690&ev=PageView&noscript=1"/>
+    </noscript>
+
+    <!-- Schema.org JSON-LD -->
+    <script type="application/ld+json">
+      {JSON.stringify(courseJsonLd)}
+    </script>
+  </head>
+
+  <body class="min-h-screen bg-base-100 text-base-content">
+    <slot />
+
+    <!-- Ejemplo de evento Ads en page_view -->
+    <script is:inline>
+      if (typeof gtag === 'function') {
+        gtag('event', 'page_view', {
+          send_to: 'AW-123456789',
+          ecomm_pagetype: 'course'
+        });
+      }
+    </script>
+  </body>
+</html>
+
+<style is:global>
+  /* 🎨 Overrides compatibles con DaisyUI (usa tokens de tema) */
+  /* Para cualquier tema activo vía data-theme */
+  html {
+    /* Primary */
+    --p: 34 92% 40%;      /* HSL (h s l /% sin la barra) DaisyUI espera este formato */
+    --pc: 0 0% 100%;
+    /* Secondary opcional */
+    --s: 219 86% 47%;
+    --sc: 0 0% 100%;
+  }
+
+  /* Si querés solo cuando el tema sea emerald */
+  html[data-theme="emerald"] {
+    --p: 142 76% 36%;
+    --pc: 0 0% 100%;
+  }
+</style>
+

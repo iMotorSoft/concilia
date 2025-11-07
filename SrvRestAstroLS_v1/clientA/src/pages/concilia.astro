@@ -1,0 +1,18 @@
+---
+import Layout from '../layouts/Layout.astro';
+import ConciliaApp from "../components/agui/ConciliaApp.svelte";
+
+const canonicalHref = new URL(Astro.url.pathname, Astro.site).href;
+---
+
+<Layout title="concilia | Conciliación" theme_daisyui="cupcake" canonicalUrl={canonicalHref}>
+  <div class="container mx-auto px-4 mt-3 space-y-4">
+    <header class="flex items-center justify-between">
+      <h1 class="text-2xl font-semibold">concilia</h1>
+      <span class="badge badge-primary">FCE</span>
+    </header>
+
+    <ConciliaApp client:load />
+  </div>
+</Layout>
+
