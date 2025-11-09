@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "sol-fx-hub"
+name = "concilia"
 version = "0.1.0"
 description = "FX Hub"
 authors = [
@@ -27,6 +27,7 @@ dependencies = [
     "pytest>=8.4.2",
     "openpyxl>=3.1.5",
     "aiofiles>=23.2.1",
+    "python-multipart>=0.0.20",
 ]
 
 [tool.hatch.metadata]

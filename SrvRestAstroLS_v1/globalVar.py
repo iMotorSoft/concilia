@@ -134,6 +134,7 @@ def ensure_local_dirs() -> None:
     if STORAGE_PROVIDER == "local":
         for sub in (STORAGE_INCOMING, STORAGE_CANONICAL, STORAGE_ARCHIVES):
             Path(STORAGE_LOCAL_ROOT, sub).mkdir(parents=True, exist_ok=True)
+    # Asegurar reports (en data/)
     Path(DATA_ROOT, DATA_REPORTS).mkdir(parents=True, exist_ok=True)
 
 def is_prod() -> bool:

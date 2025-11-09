@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from litestar import Litestar
 from litestar.config.cors import CORSConfig
+from litestar import get
 import uvicorn
 import globalVar as Var
 
@@ -18,11 +19,14 @@ sys.path.append(str(project_root))
 from routes.v1.agui_notify import notify_stream           # GET  /api/ag-ui/notify/stream
 from routes.v1.chat_concilia import chat_turn             # POST /api/chat/turn
 from routes.v1.uploads_concilia import upload_bank_movements  # POST /api/uploads/bank-movements
+from routes.v1.ingest_confirm import ingest_confirm          # POST /api/ingest/confirm
+
 
 route_handlers = [
     notify_stream,
     chat_turn,
     upload_bank_movements,
+    ingest_confirm,
 ]
 
 # --- CORS ---
@@ -62,6 +66,7 @@ if __name__ == "__main__":
     try:
         import globalVar as G
         G.ensure_local_dirs()
+        G.boot_log()
     except Exception:
         pass
 

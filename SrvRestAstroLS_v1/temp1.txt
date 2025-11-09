@@ -1,0 +1,62 @@
+BSD
+curl -F "threadId=test-thread" -F "file=@/media/issajar/DEVELOP/Projects/iMotorSoft/ai/dev/SpendIQ/Doc/FCE/Conciliacion/Extracto Ciudad julio.xlsx" http://localhost:7058/api/uploads/bank-movements
+
+curl -v -F "file=@/media/issajar/DEVELOP/Projects/iMotorSoft/ai/dev/SpendIQ/Doc/FCE/Conciliacion/Extracto Ciudad julio.xlsx" http://localhost:8059/upload
+
+uvicorn test_upload.py:app --host 0.0.0.0 --port 8059 --reload
+
+
+uvicorn test_upload_starlette:app --host 0.0.0.0 --port 8059 --reload
+
+
+curl -F "file=@/media/issajar/DEVELOP/Projects/iMotorSoft/ai/dev/SpendIQ/Doc/FCE/Conciliacion/Extracto Ciudad julio.xlsx" \
+     http://localhost:8059/upload | jq
+     
+curl -v \
+  -F "threadId=test-thread" \
+  -F "file=@/media/issajar/DEVELOP/Projects/iMotorSoft/ai/dev/SpendIQ/Doc/FCE/Conciliacion/Extracto Ciudad julio.xlsx" \
+  http://localhost:7058/api/uploads/bank-movements     
+
+Claro, aquí tienes un resumen de lo que hicimos y dónde quedamos:
+
+  Resumen de la Depuración
+
+   1. Problema Inicial: El comando curl para subir un archivo (.xlsx) estaba
+      fallando con un 500 Internal Server Error.
+   2. Investigación:
+       * Identificamos que la ruta /api/uploads/bank-movements era manejada por
+         la función upload_bank_movements en routes/v1/uploads_concilia.py.
+       * Añadimos logs y descubrimos un AttributeError porque el código usaba
+         iter_chunks en lugar de read para leer el archivo.
+       * Corregimos el código para leer el archivo en bloques, pero el error 500
+         persistía, esta vez sin un traceback claro en la consola.
+       * Añadimos la dependencia aiofiles para manejar la escritura asíncrona de
+         archivos correctamente, sospechando un conflicto entre operaciones
+         síncronas y asíncronas.
+   3. Diagnóstico Final:
+       * A pesar de tener el código de manejo de archivos correcto, el error 500
+         continuaba.
+       * Para aislar la causa raíz, simplificamos la función
+         upload_bank_movements hasta el punto de que no hacía absolutamente nada
+         más que devolver una respuesta de éxito.
+       * Sorprendentemente, el error 500 siguió ocurriendo. Esto demuestra que
+         el problema no está en la lógica de tu función, sino en una capa más
+         profunda del framework (Litestar), probablemente en el middleware que
+         procesa los datos multipart/form-data antes de que tu función sea
+         llamada.
+
+  Estado Actual
+   * Código: He revertido el archivo uploads_concilia.py a la versión final y
+     correcta que utiliza aiofiles para el manejo de archivos.
+   * Dependencias: He añadido aiofiles a tu pyproject.toml y he confirmado este
+     cambio en un nuevo commit de git.
+   * Conclusión: El trabajo de depuración está "guardado". El proyecto está en
+     un estado coherente.
+
+  Próximo Paso
+
+  Cuando quieras continuar, el siguiente paso recomendado es actualizar la
+  versión de Litestar en tu pyproject.toml, ya que es muy probable que el
+  error sea un bug en la versión 2.18.0 que ya ha sido solucionado en
+  versiones más recientes.
+
