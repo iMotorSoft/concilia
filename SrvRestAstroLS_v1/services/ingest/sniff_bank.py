@@ -42,24 +42,37 @@ TABLE_HEADER_HINTS = (
     "BENEFICIARIO", "INGRESOS", "EGRESOS", "ACUMULADO",
 )
 EXCLUDE_TEXT_HINTS = ("SALDO INICIAL", "SALDO FINAL")
+PILAGA_HEADER_KEYWORDS = ("RESUMEN CUENTA BANCARIA",)
 
-# ===== API pública =====
+# ===== Safe wrapper pública =====
 def sniff_file(path: Path | str, filename_hint: Optional[str] = None) -> dict:
-    """Alias conveniente para el router."""
+    """Entry point seguro: nunca levanta excepción."""
     p = Path(path)
-    return sniff_path(p, filename_hint or p.name)
+    try:
+        return sniff_path(p, filename_hint or p.name)
+    except Exception as e:
+        import traceback
+        print("[sniff_file] ERROR:", type(e).__name__, str(e), flush=True)
+        print(traceback.format_exc(limit=8), flush=True)
+        return {
+            "kind": "unknown",
+            "detected": {"error": f"{type(e).__name__}: {e}"},
+            "table": {"columns": [], "sample": []},
+            "suggest": {},
+            "needs": {"bank": True, "account_id": False, "period_range": True},
+        }
 
 def sniff_path(path: Path, filename_hint: Optional[str] = None) -> dict:
-    p = Path(path)
-    if p.suffix.lower() in (".xlsx", ".xls"):
-        return sniff_excel(p, filename_hint)
-    if p.suffix.lower() == ".csv":
-        return sniff_csv(p)
-    return {"kind": "unknown", "detected": {}, "table": {"columns": [], "sample": []}, "suggest": {}}
+    suffix = path.suffix.lower()
+    if suffix in (".xlsx", ".xls"):
+        return sniff_excel(path, filename_hint or path.name)
+    if suffix == ".csv":
+        return sniff_csv(path)
+    return {"kind": "unknown", "detected": {}, "table": {"columns": [], "sample": []}, "suggest": {}, "needs": {"bank": True, "account_id": False, "period_range": True}}
 
 # ===== Excel principal =====
 def sniff_excel(path: Path, filename_hint: Optional[str]) -> dict:
-    # Vista previa básica (para UI) – no impacta en performance real
+    # Vista previa (para UI)
     cols_preview, rows_preview, min_date_tab, max_date_tab = read_table_preview(path)
 
     # Header comprimido
@@ -68,15 +81,25 @@ def sniff_excel(path: Path, filename_hint: Optional[str]) -> dict:
     compact_header_lines = compact_header(raw_header_lines)
     header_excerpt = "\n".join(compact_header_lines)
 
-    # Detección de tipo
-    kind = decide_kind(header_excerpt, grid, cols_preview)
+    # Nombre de la primera hoja
+    first_sheet_name = read_first_sheet_name(path)
+
+    # 1) PILAGA primero (prioridad)
+    if looks_like_pilaga(header_excerpt, grid, first_sheet_name, cols_preview):
+        kind = "gl"
+    else:
+        # 2) Extracto si no parece PILAGA
+        if header_has_bank_extract_fields(header_excerpt, grid) or columns_look_like_bank(cols_preview):
+            kind = "bank_movements"
+        else:
+            kind = "unknown"
 
     # Cuenta / Banco
     account_core_dv = header_extract_account(grid)
     if not account_core_dv and kind == "gl":
         account_core_dv = pilaga_extract_account(grid)
 
-    # Fechas detectadas por header o muestra
+    # Fechas por header o por muestra
     header_from, header_to = header_extract_period(grid)
     period_from = header_from or min_date_tab
     period_to   = header_to   or max_date_tab
@@ -87,7 +110,6 @@ def sniff_excel(path: Path, filename_hint: Optional[str]) -> dict:
         if fmin and fmax:
             period_from, period_to = fmin, fmax
         else:
-            # Fallback: escaneo general por celdas
             ws_min, ws_max = scan_worksheet_dates(path)
             period_from = period_from or ws_min
             period_to   = period_to   or ws_max
@@ -98,6 +120,13 @@ def sniff_excel(path: Path, filename_hint: Optional[str]) -> dict:
             period_from = period_from or ws_min
             period_to   = period_to   or ws_max
 
+        # Re-chequeo: si por nombre/columnas es PILAGA, forzamos gl
+        if looks_like_pilaga(header_excerpt, grid, first_sheet_name, cols_preview):
+            kind = "gl"
+            fmin, fmax = fast_pilaga_period_pandas(path)
+            if fmin and fmax:
+                period_from, period_to = fmin, fmax
+
     # Banco por mapeo o por texto de header / filename
     bank = None
     account_full: Optional[str] = None
@@ -106,7 +135,7 @@ def sniff_excel(path: Path, filename_hint: Optional[str]) -> dict:
         bank = ACCOUNT_MAP[account_core_dv]["bank"]
         account_full = account_core_dv
 
-    if kind == "gl" and not bank and account_core_dv and RE_PILAGA_ACCOUNT.fullmatch(account_core_dv):
+    if kind == "gl" and not bank and account_core_dv and RE_PILAGA_ACCOUNT.fullmatch(str(account_core_dv)):
         mapped_full = map_short_account_to_full(account_core_dv)
         if mapped_full:
             account_full = mapped_full
@@ -164,31 +193,49 @@ def header_has_bank_extract_fields(header_excerpt: str | None, grid: list[list[s
         return True
     return False
 
-def header_looks_like_pilaga(header_excerpt: str | None, grid: list[list[str]]) -> bool:
-    text = (header_excerpt or "").upper()
-    if not text:
+def looks_like_pilaga(header_excerpt: str | None, grid: list[list[str]], first_sheet_name: Optional[str], cols_preview: list[str]) -> bool:
+    # 1) Palabras clave en header
+    up = (header_excerpt or "").upper()
+    if any(k in up for k in PILAGA_HEADER_KEYWORDS):
         return True
-    if header_has_bank_extract_fields(header_excerpt, grid):
-        return False
+
+    # 2) Cuenta corta (###/d) en primeras filas Y sin “CC $ / Tipo y Nro”
     for row in (grid or []):
-        line = " ".join([c for c in row if c]).upper()
-        if RE_PILAGA_ACCOUNT.search(line) and "CC $" not in line and "TIPO Y NRO" not in line:
+        line = " ".join([c for c in row if c])
+        up_line = line.upper()
+        if RE_PILAGA_ACCOUNT.search(line) and "CC $" not in up_line and "TIPO Y NRO" not in up_line:
             return True
+
+    # 3) Nombre de hoja típico
+    if first_sheet_name and first_sheet_name.lower() in PREFERRED_GL_SHEET_NAMES:
+        return True
+
+    # 4) Columnas típicas PILAGA
+    if columns_look_like_pilaga(cols_preview):
+        return True
+
     return False
+
+def columns_look_like_pilaga(cols: list[str]) -> bool:
+    up = [c.strip().upper() for c in (cols or [])]
+    has_fecha = any(c == "FECHA" or c.startswith("FECHA") for c in up)
+    has_ing = any("INGRESO" in c for c in up)
+    has_egr = any("EGRESO" in c for c in up)
+    has_acu = any("ACUMULADO" in c for c in up)
+    has_doc = any("DOCUMENTO" in c or "DOC." in c for c in up)
+    has_ben = any("BENEFICIARIO" in c for c in up)
+    score_iea = sum([has_ing, has_egr, has_acu])
+    return has_fecha and score_iea >= 2 and (has_doc or has_ben)
 
 def columns_look_like_bank(cols: list[str]) -> bool:
     up = [c.strip().upper() for c in (cols or [])]
-    hints_any = any(h in upj for upj in up for h in ("FECHA", "DESCRIPCIÓN", "CONCEPTO", "DETALLE"))
-    money_any = any(h in upj for upj in up for h in ("DEBE", "HABER", "DÉBITO", "CRÉDITO", "IMPORTE", "MONTO"))
-    saldo_any = any("SALDO" in upj for upj in up)
-    return (hints_any and (money_any or saldo_any))
-
-def decide_kind(header_excerpt: str | None, grid: list[list[str]], cols: list[str]) -> str:
-    if header_has_bank_extract_fields(header_excerpt, grid) or columns_look_like_bank(cols):
-        return "bank_movements"
-    if header_looks_like_pilaga(header_excerpt, grid):
-        return "gl"
-    return "unknown"
+    if columns_look_like_pilaga(cols):  # no confundir
+        return False
+    has_fecha = any(c == "FECHA" or c.startswith("FECHA") for c in up)
+    has_desc  = any("DESCRIP" in c or "DETALLE" in c or "CONCEPTO" in c for c in up)
+    money_any = any(any(h in c for h in ("DEBE", "HABER", "DÉBITO", "CRÉDITO", "IMPORTE", "MONTO")) for c in up)
+    saldo_any = any("SALDO" in c for c in up)
+    return has_fecha and (has_desc or money_any or saldo_any)
 
 # ===== Header parsing & helpers =====
 def read_excel_header_grid(path: Path, max_rows: int = 20, max_cols: int = 12) -> list[list[str]]:
@@ -205,6 +252,17 @@ def read_excel_header_grid(path: Path, max_rows: int = 20, max_cols: int = 12) -
         return grid
     except Exception:
         return []
+
+def read_first_sheet_name(path: Path) -> Optional[str]:
+    if not load_workbook:
+        return None
+    try:
+        wb = load_workbook(filename=str(path), read_only=True, data_only=True)
+        name = wb.worksheets[0].title
+        wb.close()
+        return name
+    except Exception:
+        return None
 
 def header_lines_from_grid(grid: list[list[str]], limit: int = 8) -> list[str]:
     lines: list[str] = []
@@ -280,7 +338,7 @@ def clean_date_text(s: Optional[str]) -> Optional[str]:
     if s is None:
         return None
     s = s.replace("\ufeff", "").replace("\xa0", " ").strip()
-    s = re.sub(r"^[^\d]+", "", s)  # quita apóstrofo u otros prefijos
+    s = re.sub(r"^[^\d]+", "", s)
     return s or None
 
 def parse_dmy(s: Optional[str]) -> Optional[str]:
@@ -308,12 +366,6 @@ def parse_dmy(s: Optional[str]) -> Optional[str]:
 
 # ===== FAST PATH PILAGA con pandas =====
 def fast_pilaga_period_pandas(path: Path) -> tuple[Optional[str], Optional[str]]:
-    """Rango rápido (desde/hasta) para contables:
-       - Busca hoja 'archivo contable' (insensible); si no, usa primera.
-       - Toma 1ra columna.
-       - Salta encabezado (o detecta fila con 'Fecha').
-       - Limpia apóstrofos y descarta 'Saldo inicial/final'.
-    """
     if pd is None:
         return None, None
     try:
@@ -326,26 +378,20 @@ def fast_pilaga_period_pandas(path: Path) -> tuple[Optional[str], Optional[str]]
                 sheet = xls.sheet_names[low_names.index(pref)]
                 break
         if sheet is None:
-            # fallback: primera hoja
             sheet = xls.sheet_names[0]
 
-        # Leemos sin header para preservar líneas de encabezado
         df = pd.read_excel(xls, sheet_name=sheet, header=None)
-
         if df.shape[1] == 0:
             return None, None
 
         s = df.iloc[:, 0].astype(str)
 
-        # Detectar fila 'Fecha' (si existe), sino saltar primeras 2 como tu snippet
+        # Detectar fila 'Fecha' (si existe), sino saltar primeras 2
         idx_fecha = s.str.strip().str.lower().eq("fecha")
-        if idx_fecha.any():
-            start = int(idx_fecha[idx_fecha].index[0]) + 1
-        else:
-            start = 2
+        start = (int(idx_fecha[idx_fecha].index[0]) + 1) if idx_fecha.any() else 2
         s = s.iloc[start:]
 
-        # Limpiar y filtrar ruido
+        # Limpiar/filtrar ruido
         s = s[~s.str.upper().str.contains("|".join(EXCLUDE_TEXT_HINTS), na=False)]
         s = s.str.replace(r"^[^\d]+", "", regex=True)
 
@@ -357,7 +403,7 @@ def fast_pilaga_period_pandas(path: Path) -> tuple[Optional[str], Optional[str]]
     except Exception:
         return None, None
 
-# ===== Fallback: escaneo general de hoja =====
+# ===== Fallback: escaneo general =====
 def scan_worksheet_dates(path: Path, max_rows: int = 30000) -> tuple[Optional[str], Optional[str]]:
     if not load_workbook:
         return None, None
@@ -388,7 +434,6 @@ def _as_date(val: Any) -> Optional[date]:
     if isinstance(val, date):
         return val
     if isinstance(val, (int, float)):
-        # Evitar confundir importes con fechas
         if isinstance(val, float) and not float(val).is_integer():
             return None
         if 20000 <= int(val) <= 80000:
@@ -401,7 +446,7 @@ def _as_date(val: Any) -> Optional[date]:
             return datetime.fromisoformat(iso).date()
     return None
 
-# ===== Preview tabular para UI =====
+# ===== Preview tabular =====
 def read_table_preview(path: Path) -> tuple[list[str], list[list[Any]], Optional[str], Optional[str]]:
     if pd is None:
         return [], [], None, None
@@ -445,14 +490,13 @@ def try_parse_dates_in_df(df) -> tuple[Optional[str], Optional[str]]:
 # ===== CSV =====
 def sniff_csv(path: Path) -> dict:
     cols, rows, min_date, max_date = read_csv_preview(path)
-    out = {
+    return {
         "kind": "csv",
         "detected": {"bank": None, "account_core_dv": None, "period_from": min_date, "period_to": max_date},
         "table": {"columns": cols, "sample": rows},
         "suggest": {"period_from": min_date, "period_to": max_date},
         "needs": {"bank": True, "account_id": False, "period_range": not (min_date and max_date)},
     }
-    return out
 
 def read_csv_preview(path: Path) -> tuple[list[str], list[list[Any]], Optional[str], Optional[str]]:
     if pd is None:
@@ -479,4 +523,3 @@ def map_short_account_to_full(short_code: str) -> Optional[str]:
     if len(candidates) == 1:
         return candidates[0]
     return None
-
