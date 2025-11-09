@@ -5,7 +5,7 @@ from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import Optional, Any, List, Tuple
 
-# ===== Dependencias opcionales =====
+# ===== Dependencias =====
 try:
     import pandas as pd  # type: ignore
 except Exception:
@@ -22,6 +22,8 @@ ACCOUNT_MAP = {
     "100-393300535-000": {"bank": "patagonia", "display": "Banco Patagonia - CC $"},
     "163-0-015508/3":    {"bank": "santander", "display": "Banco Santander - CC $"},
 }
+
+PREFERRED_GL_SHEET_NAMES = ["archivo contable", "contable", "resumen"]  # intentos por nombre de hoja
 
 BANK_HINTS = [
     ("BANCO CIUDAD", "ciudad"),
@@ -41,7 +43,12 @@ TABLE_HEADER_HINTS = (
 )
 EXCLUDE_TEXT_HINTS = ("SALDO INICIAL", "SALDO FINAL")
 
-# ===== Entry point =====
+# ===== API pública =====
+def sniff_file(path: Path | str, filename_hint: Optional[str] = None) -> dict:
+    """Alias conveniente para el router."""
+    p = Path(path)
+    return sniff_path(p, filename_hint or p.name)
+
 def sniff_path(path: Path, filename_hint: Optional[str] = None) -> dict:
     p = Path(path)
     if p.suffix.lower() in (".xlsx", ".xls"):
@@ -50,39 +57,48 @@ def sniff_path(path: Path, filename_hint: Optional[str] = None) -> dict:
         return sniff_csv(p)
     return {"kind": "unknown", "detected": {}, "table": {"columns": [], "sample": []}, "suggest": {}}
 
-# ===== Excel =====
+# ===== Excel principal =====
 def sniff_excel(path: Path, filename_hint: Optional[str]) -> dict:
-    grid = read_excel_header_grid(path, max_rows=20, max_cols=12)
+    # Vista previa básica (para UI) – no impacta en performance real
     cols_preview, rows_preview, min_date_tab, max_date_tab = read_table_preview(path)
 
+    # Header comprimido
+    grid = read_excel_header_grid(path, max_rows=20, max_cols=12)
     raw_header_lines = header_lines_from_grid(grid, limit=8)
     compact_header_lines = compact_header(raw_header_lines)
     header_excerpt = "\n".join(compact_header_lines)
 
+    # Detección de tipo
     kind = decide_kind(header_excerpt, grid, cols_preview)
 
-    # Cuenta
+    # Cuenta / Banco
     account_core_dv = header_extract_account(grid)
     if not account_core_dv and kind == "gl":
         account_core_dv = pilaga_extract_account(grid)
 
-    # Fechas (header o tabla)
+    # Fechas detectadas por header o muestra
     header_from, header_to = header_extract_period(grid)
-    period_from = None
-    period_to = None
+    period_from = header_from or min_date_tab
+    period_to   = header_to   or max_date_tab
 
-    # === Prioridad para CONTABLE (PILAGA): columna "Fecha" ===
+    # === FAST PATH para CONTABLE (PILAGA) con pandas ===
     if kind == "gl":
-        fmin, fmax = fecha_column_range(path, header_keyword="Fecha")
+        fmin, fmax = fast_pilaga_period_pandas(path)
         if fmin and fmax:
             period_from, period_to = fmin, fmax
+        else:
+            # Fallback: escaneo general por celdas
+            ws_min, ws_max = scan_worksheet_dates(path)
+            period_from = period_from or ws_min
+            period_to   = period_to   or ws_max
+    else:
+        # Extractos: si faltan, escaneo general
+        if not (period_from and period_to):
+            ws_min, ws_max = scan_worksheet_dates(path)
+            period_from = period_from or ws_min
+            period_to   = period_to   or ws_max
 
-    # Si no se encontraron fechas con el método prioritario, usar los otros métodos
-    if not (period_from and period_to):
-        period_from = header_from or min_date_tab
-        period_to = header_to or max_date_tab
-
-    # Banco + mapeo PILAGA (short→full)
+    # Banco por mapeo o por texto de header / filename
     bank = None
     account_full: Optional[str] = None
 
@@ -264,7 +280,7 @@ def clean_date_text(s: Optional[str]) -> Optional[str]:
     if s is None:
         return None
     s = s.replace("\ufeff", "").replace("\xa0", " ").strip()
-    s = re.sub(r"^[^\d]+", "", s)  # quita prefijos no numéricos, ej. '01/08/2025
+    s = re.sub(r"^[^\d]+", "", s)  # quita apóstrofo u otros prefijos
     return s or None
 
 def parse_dmy(s: Optional[str]) -> Optional[str]:
@@ -290,66 +306,81 @@ def parse_dmy(s: Optional[str]) -> Optional[str]:
         pass
     return None
 
-# ===== Detección prioritaria por columna "Fecha" (PILAGA) =====
-def fecha_column_range(path: Path, header_keyword: str = "Fecha") -> tuple[Optional[str], Optional[str]]:
-    """Busca una columna cuyo encabezado contenga 'Fecha' y devuelve min/max ISO.
-       Ignora filas con 'Saldo inicial/final'. Limpia apóstrofos u otros prefijos."""
+# ===== FAST PATH PILAGA con pandas =====
+def fast_pilaga_period_pandas(path: Path) -> tuple[Optional[str], Optional[str]]:
+    """Rango rápido (desde/hasta) para contables:
+       - Busca hoja 'archivo contable' (insensible); si no, usa primera.
+       - Toma 1ra columna.
+       - Salta encabezado (o detecta fila con 'Fecha').
+       - Limpia apóstrofos y descarta 'Saldo inicial/final'.
+    """
+    if pd is None:
+        return None, None
+    try:
+        xls = pd.ExcelFile(str(path), engine="openpyxl")
+        # hoja preferida
+        sheet = None
+        low_names = [n.lower() for n in xls.sheet_names]
+        for pref in PREFERRED_GL_SHEET_NAMES:
+            if pref in low_names:
+                sheet = xls.sheet_names[low_names.index(pref)]
+                break
+        if sheet is None:
+            # fallback: primera hoja
+            sheet = xls.sheet_names[0]
+
+        # Leemos sin header para preservar líneas de encabezado
+        df = pd.read_excel(xls, sheet_name=sheet, header=None)
+
+        if df.shape[1] == 0:
+            return None, None
+
+        s = df.iloc[:, 0].astype(str)
+
+        # Detectar fila 'Fecha' (si existe), sino saltar primeras 2 como tu snippet
+        idx_fecha = s.str.strip().str.lower().eq("fecha")
+        if idx_fecha.any():
+            start = int(idx_fecha[idx_fecha].index[0]) + 1
+        else:
+            start = 2
+        s = s.iloc[start:]
+
+        # Limpiar y filtrar ruido
+        s = s[~s.str.upper().str.contains("|".join(EXCLUDE_TEXT_HINTS), na=False)]
+        s = s.str.replace(r"^[^\d]+", "", regex=True)
+
+        dt = pd.to_datetime(s, dayfirst=True, errors="coerce").dropna()
+        if dt.empty:
+            return None, None
+
+        return dt.min().date().isoformat(), dt.max().date().isoformat()
+    except Exception:
+        return None, None
+
+# ===== Fallback: escaneo general de hoja =====
+def scan_worksheet_dates(path: Path, max_rows: int = 30000) -> tuple[Optional[str], Optional[str]]:
     if not load_workbook:
         return None, None
     try:
         wb = load_workbook(filename=str(path), read_only=True, data_only=True)
         ws = wb.worksheets[0]
-
-        header_row_idx = -1
-        fecha_col_idx = -1
-
-        # 1) localizar encabezado 'Fecha' (limitar búsqueda a primeras 30 filas)
-        for r in range(1, min(30, ws.max_row + 1)):
-            found = False
-            for c in range(1, ws.max_column + 1):
-                v = ws.cell(row=r, column=c).value
-                if v and header_keyword.lower() in str(v).lower():
-                    header_row_idx = r
-                    fecha_col_idx = c
-                    found = True
-                    break
-            if found:
-                break
-
-        if header_row_idx == -1 or fecha_col_idx == -1:
-            wb.close()
-            return None, None
-
         dmin: Optional[date] = None
         dmax: Optional[date] = None
 
-        # 2) recorrer columna desde la fila siguiente al encabezado
-        empty_rows_in_a_row = 0
-        for rr in range(header_row_idx + 1, ws.max_row + 1):
-            # Ignorar filas “saldo inicial/final”
-            row_text = " ".join([str(x) for x in (cell.value for cell in ws[rr]) if x]).upper()
+        for row in ws.iter_rows(min_row=1, max_row=max_rows, values_only=True):
+            row_text = " ".join([str(c) for c in row if c]).upper()
             if any(h in row_text for h in EXCLUDE_TEXT_HINTS):
                 continue
-
-            cell_val = ws.cell(row=rr, column=fecha_col_idx).value
-            dt = _as_date(cell_val)
-            if dt:
-                dmin = dt if (dmin is None or dt < dmin) else dmin
-                dmax = dt if (dmax is None or dt > dmax) else dmax
-                empty_rows_in_a_row = 0  # Reset counter on valid date
-            elif not cell_val:
-                empty_rows_in_a_row += 1
-
-            # Si encontramos 20 filas vacías seguidas, asumimos fin de tabla
-            if empty_rows_in_a_row >= 20:
-                break
+            for cell in row:
+                dt = _as_date(cell)
+                if dt:
+                    dmin = dt if (dmin is None or dt < dmin) else dmin
+                    dmax = dt if (dmax is None or dt > dmax) else dmax
 
         wb.close()
         return (dmin.isoformat() if dmin else None, dmax.isoformat() if dmax else None)
     except Exception:
         return None, None
-
-
 
 def _as_date(val: Any) -> Optional[date]:
     if isinstance(val, datetime):
@@ -357,12 +388,10 @@ def _as_date(val: Any) -> Optional[date]:
     if isinstance(val, date):
         return val
     if isinstance(val, (int, float)):
-        # Posible serial de Excel: evitar confundir importes (descartar floats no enteros y rangos irreales)
+        # Evitar confundir importes con fechas
         if isinstance(val, float) and not float(val).is_integer():
             return None
-        # Rango típico de serial date Excel (~40000 ≈ 2009-10-16)
         if 20000 <= int(val) <= 80000:
-            # Excel base 1899-12-30
             base = datetime(1899, 12, 30)
             return (base + timedelta(days=int(val))).date()
         return None
@@ -372,7 +401,7 @@ def _as_date(val: Any) -> Optional[date]:
             return datetime.fromisoformat(iso).date()
     return None
 
-# ===== Table preview (xlsx/csv) =====
+# ===== Preview tabular para UI =====
 def read_table_preview(path: Path) -> tuple[list[str], list[list[Any]], Optional[str], Optional[str]]:
     if pd is None:
         return [], [], None, None
@@ -395,10 +424,10 @@ def try_parse_dates_in_df(df) -> tuple[Optional[str], Optional[str]]:
             date_col = c; break
         if s.dtype == "object" and pd is not None:
             try:
-                # Convertir toda la columna usando la lógica robusta de _as_date
-                parsed = s.map(_as_date)
+                s2 = s.astype(str).map(clean_date_text)
+                parsed = pd.to_datetime(s2, errors="coerce", dayfirst=True, infer_datetime_format=True)
                 if parsed.notna().sum() >= max(3, int(len(parsed) * 0.1)):
-                    df[c] = pd.to_datetime(parsed, errors="coerce")
+                    df[c] = parsed
                     date_col = c
                     break
             except Exception:
