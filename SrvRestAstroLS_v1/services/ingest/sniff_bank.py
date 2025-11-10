@@ -470,7 +470,8 @@ def try_parse_dates_in_df(df) -> tuple[Optional[str], Optional[str]]:
         if s.dtype == "object" and pd is not None:
             try:
                 s2 = s.astype(str).map(clean_date_text)
-                parsed = pd.to_datetime(s2, errors="coerce", dayfirst=True, infer_datetime_format=True)
+                #parsed = pd.to_datetime(s2, errors="coerce", dayfirst=True, infer_datetime_format=True)
+                parsed = pd.to_datetime(s2, errors="coerce", dayfirst=True)
                 if parsed.notna().sum() >= max(3, int(len(parsed) * 0.1)):
                     df[c] = parsed
                     date_col = c
