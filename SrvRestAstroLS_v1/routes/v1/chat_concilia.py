@@ -29,7 +29,7 @@ async def chat_turn(data: Dict[str, Any]) -> Response:
     if re.search(r"\bextracto\b", text):
         await push({
             "type": "TEXT_MESSAGE_REQUEST_UPLOAD",
-            "payload": { "form": upload_form("/api/uploads/ingest?role=extracto", ".xlsx,.xls,.csv") },
+            "payload": { "form": upload_form("/api/uploads/v2/ingest?role=extracto", ".xlsx,.xls,.csv") },
         })
         return Response({"ok": True}, status_code=200)
 
@@ -37,7 +37,7 @@ async def chat_turn(data: Dict[str, Any]) -> Response:
     if re.search(r"\b(contable|pilaga)\b", text):
         await push({
             "type": "TEXT_MESSAGE_REQUEST_UPLOAD",
-            "payload": { "form": upload_form("/api/uploads/ingest?role=contable", ".xlsx,.xls") },
+            "payload": { "form": upload_form("/api/uploads/v2/ingest?role=contable", ".xlsx,.xls") },
         })
         return Response({"ok": True}, status_code=200)
 
@@ -47,4 +47,3 @@ async def chat_turn(data: Dict[str, Any]) -> Response:
         "delta": "Decime 'subir extracto' o 'subir contable' para abrir el modal.",
     })
     return Response({"ok": True}, status_code=200)
-

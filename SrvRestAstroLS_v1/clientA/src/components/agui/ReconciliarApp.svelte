@@ -13,9 +13,15 @@
   let formValues: Record<string, any> = $state({});
   let fileObj: File | null = $state(null);
 
-  // Dos previews independientes
+  // Previews
   let previewExtracto: any = $state(null);
   let previewContable: any = $state(null);
+
+  // Ready & Resultados
+  let readyToReconcile = $state(false);
+  let readyMeta: any = $state(null);
+  let startingRecon = $state(false);
+  let resultSummary: any = $state(null);
 
   let es: EventSource | null = null;
   let toast: { level: "info"|"success"|"warning"|"error"; message: string } | null = $state(null);
@@ -86,13 +92,21 @@
       return;
     }
 
+    if (t === "READY_TO_RECONCILE") {
+      readyToReconcile = true;
+      readyMeta = msg?.payload || null;
+      showToast("success", "Listo para conciliar. Podés iniciar el proceso.");
+      return;
+    }
+
     if (t === "RUN_START") {
       showToast("success", "Iniciando conciliación…");
       return;
     }
 
-    if (t === "READY_TO_RECONCILE") {
-      showToast("success", "Listo para conciliar. Podés iniciar el proceso.");
+    if (t === "RESULT_READY") {
+      resultSummary = msg?.payload || { note: "Sin datos" };
+      showToast("success", "Resultados disponibles.");
       return;
     }
 
@@ -127,20 +141,6 @@
   }
 
   // ===== Upload (modal) =====
-  function normalizeEndpoint(ep: string | undefined, roleDefault: "extracto"|"contable"): string {
-    let endpoint = ep || `/api/uploads/v2/ingest?role=${encodeURIComponent(roleDefault)}`;
-    // Si viene usando la ruta vieja, la reescribimos a v2
-    if (endpoint.startsWith("/api/uploads/ingest")) {
-      endpoint = endpoint.replace("/api/uploads/ingest", "/api/uploads/v2/ingest");
-    }
-    // Asegurar que tenga role=...
-    if (!/[?&]role=/.test(endpoint)) {
-      const sep = endpoint.includes("?") ? "&" : "?";
-      endpoint = `${endpoint}${sep}role=${encodeURIComponent(roleDefault)}`;
-    }
-    return endpoint;
-  }
-
   async function onSubmitUpload() {
     if (!formSpec) return;
 
@@ -151,8 +151,8 @@
     fd.set("file", fileObj, fileObj.name);
 
     try {
-      const roleDefault: "extracto"|"contable" = (formSpec?.payload?.role === "contable") ? "contable" : "extracto";
-      const endpoint = normalizeEndpoint(formSpec?.submit?.endpoint, roleDefault);
+      const roleDefault = formSpec?.payload?.role ?? "extracto";
+      const endpoint = formSpec?.submit?.endpoint || `/api/uploads/v2/ingest?role=${encodeURIComponent(roleDefault)}`;
       const method = formSpec?.submit?.method || "POST";
 
       const res = await fetch(`${URL_REST}${endpoint}`, { method, body: fd });
@@ -188,7 +188,7 @@
       const j = await res.json();
       showToast("success", j?.message || `Confirmado (${role}).`);
 
-      // Marcar card como confirmada para ocultar el botón
+      // Marcar card como confirmada
       if (role === "extracto") {
         previewExtracto = { ...(previewExtracto || {}), confirmed: true };
       } else {
@@ -199,6 +199,24 @@
     } finally {
       if (role === "extracto") confirmBusyExtracto = false;
       else confirmBusyContable = false;
+    }
+  }
+
+  // ===== Iniciar conciliación =====
+  async function onStartReconcile() {
+    if (!readyToReconcile) return;
+    startingRecon = true;
+    try {
+      const fd = new FormData();
+      fd.set("threadId", threadId);
+      const res = await fetch(`${URL_REST}/api/reconcile/start`, { method: "POST", body: fd });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const j = await res.json();
+      showToast("success", j?.message || "Conciliación iniciada.");
+    } catch {
+      showToast("error", "No se pudo iniciar la conciliación.");
+    } finally {
+      startingRecon = false;
     }
   }
 
@@ -327,6 +345,49 @@
         {/if}
         <button class="btn btn-ghost" on:click={() => (previewContable = null)}>Descartar</button>
       </div>
+    </div>
+  </section>
+{/if}
+
+<!-- Card RESULTADOS / INICIO -->
+{#if readyToReconcile}
+  <section class="card bg-base-100 border border-base-300 shadow-sm mt-4">
+    <div class="card-body">
+      <div class="flex items-center gap-2">
+        <h3 class="font-semibold text-lg">Resultados de Conciliación</h3>
+        <span class="badge">Listo para iniciar</span>
+      </div>
+
+      <div class="text-sm opacity-80">
+        <div>Periodo: <b>{readyMeta?.period?.from || "—"} → {readyMeta?.period?.to || "—"}</b></div>
+        <div>Banco (consenso): <b>{readyMeta?.bank || "—"}</b></div>
+      </div>
+
+      <div class="mt-3 flex items-center gap-2">
+        <button class="btn btn-primary" on:click|preventDefault={onStartReconcile} disabled={startingRecon}>
+          {#if startingRecon}<span class="loading loading-spinner loading-sm mr-2" />{:else}Iniciar conciliación{/if}
+        </button>
+      </div>
+
+      {#if resultSummary}
+        <div class="mt-4 grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
+          <div class="stat border rounded-lg p-3">
+            <div class="stat-title">Coincidencias</div>
+            <div class="stat-value text-base">{resultSummary.matches ?? 0}</div>
+          </div>
+          <div class="stat border rounded-lg p-3">
+            <div class="stat-title">Solo banco</div>
+            <div class="stat-value text-base">{resultSummary.bank_only ?? 0}</div>
+          </div>
+          <div class="stat border rounded-lg p-3">
+            <div class="stat-title">Solo contable</div>
+            <div class="stat-value text-base">{resultSummary.gl_only ?? 0}</div>
+          </div>
+          {#if resultSummary.note}
+            <div class="md:col-span-3 opacity-70 mt-1">{resultSummary.note}</div>
+          {/if}
+        </div>
+      {/if}
     </div>
   </section>
 {/if}

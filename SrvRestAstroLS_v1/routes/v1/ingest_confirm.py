@@ -1,7 +1,8 @@
+# -*- coding: utf-8 -*-
 # SrvRestAstroLS_v1/routes/v1/ingest_confirm.py
 from __future__ import annotations
-import asyncio
 from typing import Any, Dict, Optional
+from datetime import date
 
 from litestar import post
 from litestar.response import Response
@@ -9,77 +10,91 @@ from litestar.response import Response
 from .agui_notify import emit
 
 # Estado en memoria por threadId
-# Estructura: { "<threadId>": {"extracto": bool, "contable": bool} }
-CONFIRMED: Dict[str, Dict[str, bool]] = {}
+# _CONFIRMS[threadId] = {"extracto": {...} | None, "contable": {...} | None}
+_CONFIRMS: Dict[str, Dict[str, Optional[dict]]] = {}
 
+def _iso_date_min(a: Optional[str], b: Optional[str]) -> Optional[str]:
+    if not a:
+        return b
+    if not b:
+        return a
+    return a if a <= b else b
 
-def _get_state(tid: str) -> Dict[str, bool]:
-    st = CONFIRMED.get(tid)
-    if not st:
-        st = {"extracto": False, "contable": False}
-        CONFIRMED[tid] = st
-    return st
-
-
-def _get_form_or_json(data: Any, key: str) -> Optional[str]:
-    # Permite usar tanto FormData como JSON
-    if hasattr(data, "get"):
-        val = data.get(key)  # starlette/litestar form
-        if val is not None:
-            return str(val)
-    try:
-        # litestar parsea automáticamente JSON → dict
-        return str(data[key]) if isinstance(data, dict) and key in data else None
-    except Exception:
-        return None
-
+def _iso_date_max(a: Optional[str], b: Optional[str]) -> Optional[str]:
+    if not a:
+        return b
+    if not b:
+        return a
+    return a if a >= b else b
 
 @post("/api/ingest/confirm")
 async def ingest_confirm(request: Any) -> Response:
     """
-    Confirma un archivo ya subido, por rol.
-    Acepta FormData o JSON con:
-      - threadId (str)   [requerido]
-      - role ("extracto" | "contable") [requerido]
-      - source_file_id, original_uri   [opcionales, por trazabilidad]
-    Efectos:
-      - Marca CONFIRMED[threadId][role] = True
-      - Emite SSE: CONFIRM_OK {role}
-      - Si ambos confirmados -> BOTH_CONFIRMED {ready:true}
+    Confirma un preview. Espera multipart/form-data:
+      - threadId (obligatorio)
+      - role: extracto | contable (obligatorio)
+      - source_file_id, original_uri, bank, period_from, period_to (opcionales)
+    Side-effects:
+      - Guarda estado por threadId/role.
+      - Emite READY_TO_RECONCILE por SSE cuando los 2 están confirmados.
     """
-    data = {}
-    try:
-        ct = (request.headers.get("content-type") or "").lower()
-        if "multipart/form-data" in ct:
-            data = await request.form()
-        elif "application/json" in ct:
-            data = await request.json()
-        else:
-            data = await request.form()
+    form = await request.form()
+    threadId = (form.get("threadId") or "").strip()
+    role = (form.get("role") or "").strip().lower()
 
-        thread_id = _get_form_or_json(data, "threadId")
-        role = (_get_form_or_json(data, "role") or "").strip().lower()
+    if not threadId:
+        return Response({"ok": False, "message": "Falta threadId"}, status_code=400)
+    if role not in {"extracto", "contable"}:
+        return Response({"ok": False, "message": "role inválido (use extracto|contable)"}, status_code=400)
 
-        if not thread_id:
-            return Response({"ok": False, "message": "Falta threadId"}, status_code=400)
-        if role not in ("extracto", "contable"):
-            return Response({"ok": False, "message": "role inválido (extracto|contable)"}, status_code=400)
+    source_file_id = (form.get("source_file_id") or "").strip()
+    original_uri   = (form.get("original_uri") or "").strip()
+    bank           = (form.get("bank") or "").strip() or None
+    period_from    = (form.get("period_from") or "").strip() or None
+    period_to      = (form.get("period_to") or "").strip() or None
 
-        # marcar estado
-        st = _get_state(thread_id)
-        st[role] = True
+    state = _CONFIRMS.setdefault(threadId, {"extracto": None, "contable": None})
+    state[role] = {
+        "source_file_id": source_file_id,
+        "original_uri": original_uri,
+        "bank": bank,
+        "period_from": period_from,
+        "period_to": period_to,
+        "confirmed": True,
+    }
 
-        # emitir confirmación de ese rol
-        asyncio.create_task(emit(thread_id, {"type": "CONFIRM_OK", "payload": {"role": role}}))
+    # Feedback inmediato
+    await emit(threadId, {
+        "type": "TOAST", "level": "success",
+        "message": f"{role.capitalize()} confirmado."
+    })
 
-        # si ambos confirmados → avisar
-        if st["extracto"] and st["contable"]:
-            asyncio.create_task(emit(thread_id, {"type": "BOTH_CONFIRMED", "payload": {"ready": True}}))
+    # Si ambos están confirmados, emitir READY_TO_RECONCILE
+    e = state.get("extracto")
+    c = state.get("contable")
+    if e and c and e.get("confirmed") and c.get("confirmed"):
+        # Banco “consenso” (si coincide)
+        bank_consensus = e.get("bank") if e.get("bank") == c.get("bank") else None
+        # Rango total (mínimo de los from, máximo de los to)
+        from_union = _iso_date_min(e.get("period_from"), c.get("period_from"))
+        to_union   = _iso_date_max(e.get("period_to"), c.get("period_to"))
 
-        return Response({"ok": True, "message": "Confirmado"}, status_code=200)
+        await emit(threadId, {
+            "type": "READY_TO_RECONCILE",
+            "payload": {
+                "roles": ["extracto", "contable"],
+                "bank": bank_consensus,
+                "period": {"from": from_union, "to": to_union},
+                "files": {
+                    "extracto": {"uri": e.get("original_uri")},
+                    "contable": {"uri": c.get("original_uri")},
+                }
+            }
+        })
 
-    except Exception as e:
-        asyncio.create_task(emit(_get_form_or_json(data or {}, "threadId"), {
-            "type": "TOAST", "level": "error", "message": f"Confirm error: {type(e).__name__}: {e}"
-        }))
-        return Response({"ok": False, "message": "Error interno"}, status_code=500)
+    return Response({"ok": True, "message": "Confirmado"}, status_code=200)
+
+# Exponer estado para otros endpoints (reconcile_start)
+def get_confirms(thread_id: str) -> Dict[str, Optional[dict]]:
+    return _CONFIRMS.get(thread_id, {"extracto": None, "contable": None})
+

@@ -23,6 +23,8 @@ from routes.v1.ingest_confirm import ingest_confirm
 from routes.v1.uploads_concilia import upload_bank_movements
 # v2 (NUEVA) — la que usa ReconciliarApp.svelte
 from routes.v1.uploads_v2_concilia import upload_ingest_v2
+from routes.v1.reconcile_start import reconcile_start          # <-- NUEVO
+
 
 route_handlers = [
     notify_stream,
@@ -30,12 +32,9 @@ route_handlers = [
     ingest_confirm,
     upload_bank_movements,  # dejamos la v1 por compat
     upload_ingest_v2,       # montamos v2
+    reconcile_start,        # montamos reconcile_start
 ]
 
-# Healthcheck rápido
-@get("/api/health")
-def health() -> dict:
-    return {"ok": True}
 
 # --- CORS ---
 if Var.DEBUG:

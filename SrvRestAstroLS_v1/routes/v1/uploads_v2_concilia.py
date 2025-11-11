@@ -144,7 +144,7 @@ async def upload_ingest_v2(request: Any) -> Response:
 
 
 # Alias compatible (vieja) — también JSON
-@post("/api/uploads/ingest", media_type=MediaType.JSON)
+@post("/api/uploads/v2/ingest", media_type=MediaType.JSON)
 async def upload_ingest_alias(request: Any) -> Response:
     role = (request.query_params.get("role") or "extracto").strip().lower()
     return await _handle_upload(request, role_required=role, path_label="alias")
