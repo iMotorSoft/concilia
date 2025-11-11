@@ -1,42 +1,50 @@
-# SrvRestAstroLS_v1/routes/v1/chat_concilia.py
 from __future__ import annotations
-
 from typing import Any, Dict
 from litestar import post
 from litestar.response import Response
+import re
+
 from .agui_notify import emit
+
+def upload_form(endpoint: str, accept: str) -> dict:
+    return {
+        "title": "Subí el archivo para analizar",
+        "hint": "Acepta .xlsx, .xls, .csv",
+        "fields": [
+            {"name": "file", "label": "Archivo", "type": "file", "accept": accept, "required": True},
+        ],
+        "submit": {"endpoint": endpoint, "method": "POST", "label": "Subir y analizar"},
+    }
 
 @post("/api/chat/turn")
 async def chat_turn(data: Dict[str, Any]) -> Response:
-    """
-    MVP: siempre pedimos el upload.
-    Emite TEXT_MESSAGE_REQUEST_UPLOAD al threadId recibido y devuelve 200.
-    """
-    thread_id = (data or {}).get("threadId")
-    correlation_id = (data or {}).get("correlationId")
-    # (opcional) texto, por si querés loguear
-    # text = (data or {}).get("text", "") or ""
+    text = (data.get("text") or "").strip().lower()
+    thread_id = data.get("threadId")
 
-    await emit(thread_id, {
-        "type": "TEXT_MESSAGE_REQUEST_UPLOAD",
-        "correlationId": correlation_id,
-        "payload": {
-            "title": "Subí el archivo para analizar",
-            "hint": "Elegí el extracto bancario (XLSX/CSV) del período",
-            "form": {
-                "modalId": "uploadBankMovements",
-                "fields": [
-                    {"name":"account_id","label":"Cuenta","type":"select","options":[],"required":True},
-                    {"name":"period","label":"Período (YYYY-MM)","type":"text","required":True,"pattern":"^\\d{4}-\\d{2}$"},
-                    {"name":"source","label":"Fuente","type":"select","options":["bank"],"required":True},
-                    {"name":"profile_id","label":"Perfil de banco","type":"select","options":["ciudad","santander","patagonia"],"required":True},
-                    {"name":"file","label":"Archivo","type":"file","accept":".xlsx,.csv","required":True}
-                ],
-                "submit":{"label":"Subir y analizar","endpoint":"/api/uploads/bank-movements","method":"POST"}
-            }
-        }
+    async def push(event: dict) -> None:
+        if thread_id:
+            await emit(thread_id, event)
+
+    # Intent: subir extracto
+    if re.search(r"\bextracto\b", text):
+        await push({
+            "type": "TEXT_MESSAGE_REQUEST_UPLOAD",
+            "payload": { "form": upload_form("/api/uploads/ingest?role=extracto", ".xlsx,.xls,.csv") },
+        })
+        return Response({"ok": True}, status_code=200)
+
+    # Intent: subir contable / pilaga
+    if re.search(r"\b(contable|pilaga)\b", text):
+        await push({
+            "type": "TEXT_MESSAGE_REQUEST_UPLOAD",
+            "payload": { "form": upload_form("/api/uploads/ingest?role=contable", ".xlsx,.xls") },
+        })
+        return Response({"ok": True}, status_code=200)
+
+    # Fallback
+    await push({
+        "type": "TEXT_MESSAGE_CONTENT",
+        "delta": "Decime 'subir extracto' o 'subir contable' para abrir el modal.",
     })
-
-    # responder 200 explícito (evitamos 201 por default)
-    return Response({"type": "OK"}, status_code=200)
+    return Response({"ok": True}, status_code=200)
 

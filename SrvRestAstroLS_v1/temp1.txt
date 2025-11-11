@@ -15,7 +15,16 @@ curl -F "file=@/media/issajar/DEVELOP/Projects/iMotorSoft/ai/dev/SpendIQ/Doc/FCE
 curl -v \
   -F "threadId=test-thread" \
   -F "file=@/media/issajar/DEVELOP/Projects/iMotorSoft/ai/dev/SpendIQ/Doc/FCE/Conciliacion/Extracto Ciudad julio.xlsx" \
-  http://localhost:7058/api/uploads/bank-movements     
+  http://localhost:7058/api/uploads/bank-movements 
+  
+curl -F "threadId=TEST" -F "file=@/media/issajar/DEVELOP/Projects/iMotorSoft/ai/dev/SpendIQ/Doc/FCE/Conciliacion/PILAGA CIUDAD JULIO.xlsx" \
+     "http://localhost:7058/api/uploads/ingest?role=contable"
+     
+curl -F "threadId=t1" -F "file=@/media/issajar/DEVELOP/Projects/iMotorSoft/ai/dev/SpendIQ/Doc/FCE/Conciliacion/PILAGA CIUDAD JULIO.xlsx" \
+  "http://localhost:7058/api/uploads/v2/ingest?role=extracto"     
+
+curl -F "threadId=t1" -F "file=/media/issajar/DEVELOP/Projects/iMotorSoft/ai/dev/SpendIQ/Doc/FCE/Conciliacion/PILAGA CIUDAD JULIO.xlsx" \
+  "http://localhost:7058/api/uploads/ingest?role=contable"           
 
 Claro, aquí tienes un resumen de lo que hicimos y dónde quedamos:
 
