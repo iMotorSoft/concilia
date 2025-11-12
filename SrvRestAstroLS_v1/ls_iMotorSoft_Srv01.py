@@ -24,6 +24,9 @@ from routes.v1.uploads_concilia import upload_bank_movements
 # v2 (NUEVA) — la que usa ReconciliarApp.svelte
 from routes.v1.uploads_v2_concilia import upload_ingest_v2
 from routes.v1.reconcile_start import reconcile_start          # <-- NUEVO
+from routes.v1.reconcile_details import reconcile_details  # <--- NUEVO
+from routes.v1.reconcile_summary import reconcile_summary  # NUEVO
+
 
 
 route_handlers = [
@@ -33,6 +36,8 @@ route_handlers = [
     upload_bank_movements,  # dejamos la v1 por compat
     upload_ingest_v2,       # montamos v2
     reconcile_start,        # montamos reconcile_start
+    reconcile_details,      # montamos reconcile_details
+    reconcile_summary,      # montamos reconcile_summary
 ]
 
 

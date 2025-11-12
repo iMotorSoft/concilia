@@ -1,0 +1,12 @@
+BSD
+✦ Claro, aquí están los comandos git que utilicé en orden:
+
+   1. git status && git diff HEAD && git log -n 3 - Para revisar el estado de ls
+      archivos, ver los cambios específicos y consultar los mensajes de commits
+      anteriores.
+   2. git add . - Para agregar todos los archivos modificados y nuevos al área e
+      preparación (staging).
+   3. git commit -m "v2 header y conciliacion mock ok" - Para guardar los cambis
+      en el repositorio local con tu mensaje.
+   4. git status - Para confirmar que el commit se realizó correctamente.
+   5. git push origin main - Para subir los cambios a GitHub.
