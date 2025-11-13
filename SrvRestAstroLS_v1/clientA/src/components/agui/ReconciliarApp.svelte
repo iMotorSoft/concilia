@@ -80,13 +80,20 @@ function handle(msg: any) {
   }
 
   if (t === "INGEST_PREVIEW") {
-    const role = msg?.payload?.role;
-    if (role === "extracto") {
-      previewExtracto = msg?.payload;
-    } else if (role === "contable") {
-      previewContable = msg?.payload;
+    const payload = msg?.payload || {};
+    const kind = (payload.kind || "").toLowerCase();
+    const role = (payload.role || "").toLowerCase();
+    const resolvedRole =
+      kind === "gl" ? "contable" :
+      kind === "bank_movements" ? "extracto" :
+      role || "";
+
+    if (resolvedRole === "extracto") {
+      previewExtracto = payload;
+    } else if (resolvedRole === "contable") {
+      previewContable = payload;
     } else {
-      previewExtracto = msg?.payload; // fallback
+      previewExtracto = payload; // fallback
     }
     dialogOpen = false;
     showToast("info", "Vista previa lista. Revisá y confirmá.");

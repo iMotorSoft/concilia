@@ -7,7 +7,7 @@ export const SITE_DESCRIPTION = 'Astrofy is a free and open-source template for 
 export const URL = '/clientA/dist/workspace/index.html'
 
 const URL_REST_DEV = 'http://localhost:7058' // 'http://localhost:7018  https://judaismoenvivo.com
-const URL_REST_PRO = 'https://solfx.imotorsoft.com' // 'http://localhost:7018  https://judaismoenvivo.com
+const URL_REST_PRO = 'https://fce.concilia.imotorsoft.com' // 'http://localhost:7018  https://judaismoenvivo.com
 
 export const URL_REST = URL_REST_DEV
 

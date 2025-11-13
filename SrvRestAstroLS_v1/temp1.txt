@@ -1,4 +1,6 @@
 BSD
+source .venv/bin/activate
+
 curl -F "threadId=test-thread" -F "file=@/media/issajar/DEVELOP/Projects/iMotorSoft/ai/dev/SpendIQ/Doc/FCE/Conciliacion/Extracto Ciudad julio.xlsx" http://localhost:7058/api/uploads/bank-movements
 
 curl -v -F "file=@/media/issajar/DEVELOP/Projects/iMotorSoft/ai/dev/SpendIQ/Doc/FCE/Conciliacion/Extracto Ciudad julio.xlsx" http://localhost:8059/upload
@@ -26,46 +28,116 @@ curl -F "threadId=t1" -F "file=@/media/issajar/DEVELOP/Projects/iMotorSoft/ai/de
 curl -F "threadId=t1" -F "file=/media/issajar/DEVELOP/Projects/iMotorSoft/ai/dev/SpendIQ/Doc/FCE/Conciliacion/PILAGA CIUDAD JULIO.xlsx" \
   "http://localhost:7058/api/uploads/ingest?role=contable"           
 
-Claro, aquí tienes un resumen de lo que hicimos y dónde quedamos:
+****************
+Revisas los excel y el resultado de la app web concilia
 
-  Resumen de la Depuración
+el error es que dice que faltan conciliar pero el monto
+5.040.000,00
 
-   1. Problema Inicial: El comando curl para subir un archivo (.xlsx) estaba
-      fallando con un 500 Internal Server Error.
-   2. Investigación:
-       * Identificamos que la ruta /api/uploads/bank-movements era manejada por
-         la función upload_bank_movements en routes/v1/uploads_concilia.py.
-       * Añadimos logs y descubrimos un AttributeError porque el código usaba
-         iter_chunks en lugar de read para leer el archivo.
-       * Corregimos el código para leer el archivo en bloques, pero el error 500
-         persistía, esta vez sin un traceback claro en la consola.
-       * Añadimos la dependencia aiofiles para manejar la escritura asíncrona de
-         archivos correctamente, sospechando un conflicto entre operaciones
-         síncronas y asíncronas.
-   3. Diagnóstico Final:
-       * A pesar de tener el código de manejo de archivos correcto, el error 500
-         continuaba.
-       * Para aislar la causa raíz, simplificamos la función
-         upload_bank_movements hasta el punto de que no hacía absolutamente nada
-         más que devolver una respuesta de éxito.
-       * Sorprendentemente, el error 500 siguió ocurriendo. Esto demuestra que
-         el problema no está en la lógica de tu función, sino en una capa más
-         profunda del framework (Litestar), probablemente en el middleware que
-         procesa los datos multipart/form-data antes de que tu función sea
-         llamada.
+aparece en los dos lados y es igual
 
-  Estado Actual
-   * Código: He revertido el archivo uploads_concilia.py a la versión final y
-     correcta que utiliza aiofiles para el manejo de archivos.
-   * Dependencias: He añadido aiofiles a tu pyproject.toml y he confirmado este
-     cambio en un nuevo commit de git.
-   * Conclusión: El trabajo de depuración está "guardado". El proyecto está en
-     un estado coherente.
+Por favor cualquier modificacion primero decimela y la tengo que aprobar
 
-  Próximo Paso
+te paso resultado
 
-  Cuando quieras continuar, el siguiente paso recomendado es actualizar la
-  versión de Litestar en tu pyproject.toml, ya que es muy probable que el
-  error sea un bug en la versión 2.18.0 que ya ha sido solucionado en
-  versiones más recientes.
+Sumario de período
+Extracto: /media/issajar/DEVELOP/Projects/iMotorSoft/ai/dev/SpendIQ/Doc/FCE/Conciliacion/09 - EXTRACTO.xlsx
+Contable: /media/issajar/DEVELOP/Projects/iMotorSoft/ai/dev/SpendIQ/Doc/FCE/Conciliacion/09 - PILAGA.xlsx
+Movimientos PILAGA
+26
+Movimientos Banco
+27
+Conciliados (pares)
+24
+No en Banco
+2
+No en PILAGA
+3
+Ventana (días)
+5
+Banco — Debe / Haber
+Debe:
+$1.094.220.098,10
+Haber:
+$1.079.539.532,40
+Resultado del período:
+$-14.680.565,70
+Saldo inicial: $14.736.647,50
+Saldo final: $56.081,80
+PILAGA — Ingresos / Egresos
+Ingresos:
+$1.090.984.532,40
+Egresos:
+$1.094.200.000,00
+Resultado del período:
+$-3.215.467,60
+Saldo inicial: $3.305.625,42
+Saldo final: $90.157,82
+Diferencia de neto (Banco - PILAGA): $-11.465.098,10
+Detalle de no conciliados
+PILAGA NO reflejado en Banco
+2
+Fecha	Monto	Documento
+2025-09-02	$ 11.445.000,00	DI01: 6479/2025
+2025-09-03	$ 5.040.000,00	DI01: 6485/2025
+Banco NO reflejado en PILAGA
+3
+Fecha	Monto	Documento
+2025-09-02	$ 5.040.000,00	6209264
+2025-09-30	-$ 16.610,00	10010930
+2025-09-30	-$ 3.488,10	10010930
+
+• Hallazgos
+
+  - Los dos archivos traen ese importe: el extracto tiene dos filas (doc 6209261
+    y 6209264, 02/09/2025) y PILAGA tiene DI01: 6484/2025 y DI01: 6485/2025
+    (03/09/2025). El loader de la API los está leyendo bien (_load_extracto
+    y _load_pilaga), porque al correrlos en consola aparecen los cuatro
+    movimientos.
+  - El problema se genera en _match_one_to_one_by_amount_and_date_window
+    (routes/v1/reconcile_start.py:303-339). Allí se arma un merge por monto
+    y se ordena por monto, diferencia de días y los índices _row_id_*, pero
+    luego se aplican dos drop_duplicates consecutivos (primero por _row_id_p,
+    luego por _row_id_b). Con importes duplicados, ambos registros de PILAGA
+    eligen la misma fila del banco (la de _row_id_b == 6, documento 6209261)
+    porque aparece antes en el sort. Cuando se eliminan duplicados por banco,
+    se descarta el segundo match y la otra fila del banco (6209264) nunca llega
+    a emparejarse. El resultado visible es exactamente el que ves en la UI:
+    una PILAGA y un banco de $5.040.000 quedan “no conciliados” aunque sean
+    idénticos.
+  - Probé reemplazar esa sección con un greedy explícito: recorrer el dataframe
+    ordenado y aceptar un match solo si _row_id_p y _row_id_b no se usaron
+    antes. Con ese enfoque, ambos pares ($5.040.000) quedan conciliados,
+    quedando solo DI01: 6479/2025 como “no en banco” y las dos salidas del 30/09
+    como “no en PILAGA”, que coincide con la expectativa de negocio (25 pares, 1
+    sobrante PILAGA, 2 sobrantes Banco).
+
+  Propuesta antes de tocar código
+
+  1. Reescribir el bloque de líneas 327-330 en routes/v1/reconcile_start.py
+     para reemplazar los drop_duplicates por un bucle greedy que marque used_gl/
+     used_bank. Esto evita que dos filas terminen apuntando al mismo banco
+     cuando existan montos repetidos.
+  2. Añadir un test de regresión (p.ej. en tests/) que construya un dataframe
+     sintético con dos movimientos de igual monto por lado y verifique que la
+     función devuelve dos pares y cero sobrantes. Así aseguramos que el bug no
+     vuelva cuando se toquen heurísticas.
+
+  Decime si aprobás estos cambios y procedo a implementarlos y a mostrarte el
+  resultado (incluyendo la corrida con tus archivos).
+
+Si, pero por favor proba antes de implementar en el codigo es correcto, da la casualidad que son dos montos iguales pero son distintas operaciones entonces es correcto conciliarlas
+
+Necesito que hagas unas pruebas, en el contable hay varias operaciones que sumadas dan el monto que esta en el extracto bancario. pero hay que buscar un logica para saber cuales
+
+Te paso otro archivos para la logica, pero considerar que aveces pueden ser varios los movimientos osea N contra 1 y no solamente 2 o 3
+Extracto
+/media/issajar/DEVELOP/Projects/iMotorSoft/ai/dev/SpendIQ/Doc/FCE/Conciliacion/EXTRACTO PATAGONIA AGOST-SEPT.xlsx
+
+Contable
+/media/issajar/DEVELOP/Projects/iMotorSoft/ai/dev/SpendIQ/Doc/FCE/Conciliacion/PILAGA PATAGONIA AGOST-SEPT.xlsx
+
+
+
+
 

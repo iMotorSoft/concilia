@@ -326,8 +326,23 @@ def _match_one_to_one_by_amount_and_date_window(
 
     # Greedy: quedarnos con el match más cercano por monto/fecha
     merged = merged.sort_values(["monto_r", "date_diff_days", "_row_id_p", "_row_id_b"])
-    merged = merged.drop_duplicates(subset=["_row_id_p"], keep="first")
-    merged = merged.drop_duplicates(subset=["_row_id_b"], keep="first")
+
+    used_p: set[int] = set()
+    used_b: set[int] = set()
+    selected_rows = []
+    for record in merged.to_dict("records"):
+        row_id_p = record["_row_id_p"]
+        row_id_b = record["_row_id_b"]
+        if row_id_p in used_p or row_id_b in used_b:
+            continue
+        used_p.add(row_id_p)
+        used_b.add(row_id_b)
+        selected_rows.append(record)
+
+    if selected_rows:
+        merged = pd.DataFrame(selected_rows, columns=merged.columns)
+    else:
+        merged = merged.iloc[0:0].copy()
 
     matched_p = set(merged["_row_id_p"])
     matched_b = set(merged["_row_id_b"])
