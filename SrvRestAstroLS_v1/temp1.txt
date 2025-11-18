@@ -1,106 +1,12 @@
 BSD
 source .venv/bin/activate
 
-curl -F "threadId=test-thread" -F "file=@/media/issajar/DEVELOP/Projects/iMotorSoft/ai/dev/SpendIQ/Doc/FCE/Conciliacion/Extracto Ciudad julio.xlsx" http://localhost:7058/api/uploads/bank-movements
-
-curl -v -F "file=@/media/issajar/DEVELOP/Projects/iMotorSoft/ai/dev/SpendIQ/Doc/FCE/Conciliacion/Extracto Ciudad julio.xlsx" http://localhost:8059/upload
-
-uvicorn test_upload.py:app --host 0.0.0.0 --port 8059 --reload
-
-
-uvicorn test_upload_starlette:app --host 0.0.0.0 --port 8059 --reload
-
-
-curl -F "file=@/media/issajar/DEVELOP/Projects/iMotorSoft/ai/dev/SpendIQ/Doc/FCE/Conciliacion/Extracto Ciudad julio.xlsx" \
-     http://localhost:8059/upload | jq
-     
-curl -v \
-  -F "threadId=test-thread" \
-  -F "file=@/media/issajar/DEVELOP/Projects/iMotorSoft/ai/dev/SpendIQ/Doc/FCE/Conciliacion/Extracto Ciudad julio.xlsx" \
-  http://localhost:7058/api/uploads/bank-movements 
-  
-curl -F "threadId=TEST" -F "file=@/media/issajar/DEVELOP/Projects/iMotorSoft/ai/dev/SpendIQ/Doc/FCE/Conciliacion/PILAGA CIUDAD JULIO.xlsx" \
-     "http://localhost:7058/api/uploads/ingest?role=contable"
-     
-curl -F "threadId=t1" -F "file=@/media/issajar/DEVELOP/Projects/iMotorSoft/ai/dev/SpendIQ/Doc/FCE/Conciliacion/PILAGA CIUDAD JULIO.xlsx" \
-  "http://localhost:7058/api/uploads/v2/ingest?role=extracto"     
-
-curl -F "threadId=t1" -F "file=/media/issajar/DEVELOP/Projects/iMotorSoft/ai/dev/SpendIQ/Doc/FCE/Conciliacion/PILAGA CIUDAD JULIO.xlsx" \
-  "http://localhost:7058/api/uploads/ingest?role=contable"           
-
-****************
-Revisas los excel y el resultado de la app web concilia
-
-el error es que dice que faltan conciliar pero el monto
-5.040.000,00
-
-aparece en los dos lados y es igual
-
-Primero necesitos que valides contra los excel los resultados, despues que me expliques para el usuario como puede validar visualmente los totales
-
-Sumario de período
-Extracto: /media/issajar/DEVELOP/Projects/iMotorSoft/ai/dev/SpendIQ/Doc/FCE/Conciliacion/EXTRACTO SANTANDER AGOST-SEPT.xlsx
-Contable: /media/issajar/DEVELOP/Projects/iMotorSoft/ai/dev/SpendIQ/Doc/FCE/Conciliacion/PILAGA SANTANDER AGOST -SEPT.xlsx
-
-
-*** Header
-Sumario de período
-Extracto: file:///media/issajar/DEVELOP/Projects/iMotorSoft/ai/dev/concilia/storage/incoming/EXTRACTO SANTANDER AGOST-SEPT.xlsx
-Contable: file:///media/issajar/DEVELOP/Projects/iMotorSoft/ai/dev/concilia/storage/incoming/PILAGA SANTANDER AGOST -SEPT.xlsx
-Movimientos PILAGA
-1371
-Movimientos Banco
-1120
-Conciliados (pares)
-470
-No en Banco
-901
-No en PILAGA
-650
-Ventana (días)
-30
-Banco — Debe / Haber
-Debe:
-$1.145.509.747,73
-Haber:
-$995.630.868,07
-Resultado del período:
-$-149.878.879,66
-Saldo inicial: $289.319.077,51
-Saldo final: $139.440.197,85
-PILAGA — Ingresos / Egresos
-Ingresos:
-$980.539.821,97
-Egresos:
-$1.208.767.077,51
-Resultado del período:
-$-228.227.255,54
-Saldo inicial: $344.886.693,89
-Saldo final: $116.659.438,35
-*******************
-
-PILAGA No reflejado en Bco 819 op 328357375.67
-Banco No reflejado en PILAGA 624 op 406705755.87
-Conciliados 1 a 1 470 pares -536543262.26
-Agrupados 26 grupos 20041368.95
-Sugeridos 0 0
-
-Perdon no entiendo o no da
-ejemplo Pilaga no reflejado + conciliados + agrupados + sugeridos = Saldo final: $116.659.438,35
-
-No da
-
-Realmente quedo muy bien, pero no esta incluido los datos de
-PILAGA No reflejado en Bco 819 op 328357375.67
-Banco No reflejado en PILAGA 624 op 406705755.87
-Conciliados 1 a 1 470 pares -536543262.26
-Agrupados 26 grupos 20041368.95
-Sugeridos 0 0
-
-Porque lo que quiero que el ususario comprende de lo movimientos en curso, que monto son conciliados, que monto es agrupados, que monto es sugeridos y los NO
-
-que sumando esa descomposicion debe dar los totales
-
+******* Grupos
+PILAGA No reflejado en Bco
+Banco No reflejado en PILAGA
+Conciliados 1 a 1
+Agrupados (<= 1)
+Sugeridos
 *************
 Por favor revisas los algoritmos, estos son todos los archivos que tenemos, pero ningun caso esta dando sugeridos, porque
 
@@ -120,20 +26,18 @@ PILAGA SANTANDER AGOST -SEPT.xlsx
 PILAGA CIUDAD JULIO.xlsx
 
 **************
-este componente realmente no lo estoy viendo necesario lo podemos sacar, como los endpoints que llama, si es que no se usan en otro lado
+Estos son nuestra areas
+PILAGA No reflejado en Bco
+Banco No reflejado en PILAGA
+Conciliados 1 a 1
+Agrupados (<= 1)
+Sugeridos
 
-Resumen visual
+que no se lance ningun proceso en forma automatica, lo vamos hacer explicito.
 
-Para validar: Resultado = (sumatoria de las 4 tarjetas) y Saldo final = Saldo inicial + Resultado.
-	Banco	PILAGA
-Movimientos	1120	1371
-Saldo inicial	$289.319.077,51	$344.886.693,89
-Resultado del período	$-149.878.879,66	$-228.227.255,54
-Saldo final	$139.440.197,85	$116.659.438,35
-Brutos	Debe $1.145.509.747,73 / Haber $995.630.868,07	Ingresos $980.539.821,97 / Egresos $1.208.767.077,51
+Empecemos por el primero
+PILAGA No reflejado en Bco
+en la misma line despues de  de op y total a la derecha poner un pequeño boton que diga calcular
 
-primero decime que opinas
-
-
-
+primero decime que entendiste
 
