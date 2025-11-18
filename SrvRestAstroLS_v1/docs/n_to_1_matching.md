@@ -103,7 +103,7 @@ Este documento sirve como punto de partida para implementar la lógica y coordin
 
 ## 8. Estado de implementación (abril 2025)
 
-- **Ventana estándar 30 días**: la UI (Astro/Svelte) ya usa un store compartido (`DEFAULT_DAYS_WINDOW = 30`) que sincroniza el valor enviado a `/api/reconcile/start`, `/api/reconcile/summary` y todos los endpoints de detalles.
+- **Ventana estándar 5 días**: la UI (Astro/Svelte) ya usa un store compartido (`DEFAULT_DAYS_WINDOW = 5`) que sincroniza el valor enviado a `/api/reconcile/start`, `/api/reconcile/summary` y todos los endpoints de detalles.
 - **Cards por área (fase 1)**: `NoBancoCard.svelte` muestra el total de PILAGA no reflejado en banco (`n op` + monto acumulado) y solo al expandirse descarga el detalle tabular. Usa un endpoint propio (`POST /api/reconcile/details/no-banco`) que retorna `{ total, total_amount, rows[] }`.
 - **Card y endpoint “Banco No reflejado en PILAGA”**: `NoContableCard.svelte` consume `POST /api/reconcile/details/no-contable`, que devuelve los sobrantes bancarios con `{ total, total_amount, rows[] }`, reutilizando el matcher actual.
 - **Card y endpoint “Agrupados aprobados (N→1)”**: `AprobadosN1Card.svelte` consume `POST /api/reconcile/details/n1/grupos`, que arma combinaciones exactas 2..6→1 sin validación manual (usa la heurística: misma ventana, mismo signo, cand_limit 20, tol $1). Se muestra como aprobados de forma automática.

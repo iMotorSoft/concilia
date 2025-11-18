@@ -1,6 +1,6 @@
 import { writable } from "svelte/store";
 
-export const DEFAULT_DAYS_WINDOW = 30;
+export const DEFAULT_DAYS_WINDOW = 5;
 
 export const daysWindowStore = writable<number>(DEFAULT_DAYS_WINDOW);
 

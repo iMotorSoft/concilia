@@ -405,7 +405,7 @@ async def reconcile_start(request: Any) -> Response:
       - threadId (opcional): para SSE
       - uri_extracto: file://... (obligatorio)
       - uri_contable: file://... (obligatorio)
-      - days_window: int (opcional, default 30)
+      - days_window: int (opcional, default 5)
 
     Emite por SSE:
       - {type:"RUN_START", ...}
@@ -418,7 +418,7 @@ async def reconcile_start(request: Any) -> Response:
         # Nueva versión usa uri_extracto / uri_contable. Aceptamos ambos.
         uri_extracto = form.get("extracto_original_uri") or form.get("uri_extracto") or ""
         uri_contable = form.get("contable_original_uri") or form.get("uri_contable") or ""
-        days_window = int(form.get("days_window") or 30)
+        days_window = int(form.get("days_window") or 5)
 
         if not uri_extracto or not uri_contable:
             return Response({"ok": False, "message": "Faltan URIs: uri_extracto y uri_contable son obligatorios."}, status_code=400)

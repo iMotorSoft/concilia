@@ -32,7 +32,7 @@ def _rows_for_ui(df: pd.DataFrame, limit: int = 500) -> list[dict]:
 def _parse_common_form(form: Any) -> Tuple[str, str, int]:
     uri_extracto = form.get("uri_extracto") or form.get("extracto_original_uri") or ""
     uri_contable = form.get("uri_contable") or form.get("contable_original_uri") or ""
-    days_window = int(form.get("days_window") or 30)
+    days_window = int(form.get("days_window") or 5)
     return uri_extracto, uri_contable, days_window
 
 
@@ -484,7 +484,7 @@ async def reconcile_details(request: Any) -> Response:
     FORM:
       - uri_extracto  (obligatorio)
       - uri_contable  (obligatorio)
-      - days_window   (opcional, default 30)
+      - days_window   (opcional, default 5)
     Devuelve:
       {
         ok: True,
@@ -528,7 +528,7 @@ async def reconcile_details_no_banco(request: Any) -> Response:
     FORM:
       - uri_extracto  (obligatorio)
       - uri_contable  (obligatorio)
-      - days_window   (opcional, default 30)
+      - days_window   (opcional, default 5)
     Devuelve:
       {
         ok: True,
@@ -574,7 +574,7 @@ async def reconcile_details_pares(request: Any) -> Response:
     FORM:
       - uri_extracto  (obligatorio)
       - uri_contable  (obligatorio)
-      - days_window   (opcional, default 30)
+      - days_window   (opcional, default 5)
     Respuesta:
       {
         ok: True,
@@ -622,7 +622,7 @@ async def reconcile_details_no_contable(request: Any) -> Response:
     FORM:
       - uri_extracto  (obligatorio)
       - uri_contable  (obligatorio)
-      - days_window   (opcional, default 30)
+      - days_window   (opcional, default 5)
     Devuelve:
       {
         ok: True,
@@ -669,7 +669,7 @@ async def reconcile_details_n1_grupos(request: Any) -> Response:
     FORM:
       - uri_extracto  (obligatorio)
       - uri_contable  (obligatorio)
-      - days_window   (opcional, default 30)
+      - days_window   (opcional, default 5)
     Respuesta:
       {
         ok: True,
@@ -725,7 +725,7 @@ async def reconcile_details_n1_sugeridos(request: Any) -> Response:
     FORM:
       - uri_extracto  (obligatorio)
       - uri_contable  (obligatorio)
-      - days_window   (opcional, default 30)
+      - days_window   (opcional, default 5)
     Respuesta:
       {
         ok: True,
