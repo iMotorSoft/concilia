@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import traceback
+import time
 from typing import Any, Optional, Tuple
 from pathlib import Path
 from urllib.parse import urlparse
@@ -16,10 +17,11 @@ from .reconcile_start import (
     _from_file_uri,              # convierte file://... en Path
     _load_pilaga,                # DF con ingreso/egreso originales + monto neto
     _load_extracto,              # DF: ['fecha','monto','documento','origen']  (importe limpio)
-    _match_one_to_one_by_amount_and_date_window,
     _get_extracto_saldos,
     _get_pilaga_saldos,
 )
+# Pipeline completo (pares, agrupados, sugeridos, sobrantes)
+from .reconcile_details import _compute_pipeline
 
 EXCLUDE_MARKERS = ("SALDO INICIAL", "SALDO FINAL")
 
@@ -103,12 +105,15 @@ async def reconcile_summary(request: Any) -> Response:
         if not uri_extracto or not uri_contable:
             return Response({"ok": False, "message": "Faltan URIs: uri_extracto y uri_contable son obligatorios."}, status_code=400)
 
+        t_start = time.perf_counter()
         path_extracto = _from_file_uri(uri_extracto)
         path_contable = _from_file_uri(uri_contable)
 
         # 1) Cargar con los mismos loaders del flujo actual
+        t_load_start = time.perf_counter()
         df_pilaga  = _filter_movements_df(_load_pilaga(path_contable))
         df_banco   = _filter_movements_df(_load_extracto(path_extracto))
+        t_after_load = time.perf_counter()
 
         # 2) Totales:
         p_ing, p_egr, p_neto = _sum_pilaga_totals(df_pilaga)
@@ -118,14 +123,28 @@ async def reconcile_summary(request: Any) -> Response:
         b_saldo_inicial, b_saldo_final = _get_extracto_saldos(path_extracto)
         p_saldo_inicial, p_saldo_final = _get_pilaga_saldos(path_contable)
 
-        # 3) Métricas de conciliación (igual que /start)
-        pairs, sobrantes_p, sobrantes_b = _match_one_to_one_by_amount_and_date_window(df_pilaga, df_banco, days_window)
+        # 3) Pipeline completo (pares 1→1, agrupados, sugeridos, sobrantes)
+        pipeline = _compute_pipeline(df_pilaga, df_banco, days_window)
+        pairs_df = pipeline["pairs_df"]
+        approved = pipeline["approved"]
+        suggested = pipeline["suggested"]
+        sobrantes_p = pipeline["sobrantes_p"]  # PILAGA no reflejado en banco
+        sobrantes_b = pipeline["sobrantes_b"]  # Banco no reflejado en PILAGA
+        timings_pipe = pipeline.get("timings", {}) if isinstance(pipeline, dict) else {}
 
         total_p = int(len(df_pilaga))
         total_b = int(len(df_banco))
-        conc_pairs   = int(len(pairs))
-        no_en_banco  = int(len(sobrantes_p))  # en PILAGA pero no en banco
-        no_en_pilaga = int(len(sobrantes_b))  # en banco pero no en PILAGA
+
+        conc_pairs = int(len(pairs_df))
+        no_en_banco = int(len(sobrantes_p))
+        no_en_pilaga = int(len(sobrantes_b))
+
+        # Totales por categoría (monto con signo, siguiendo los mismos cálculos de los endpoints de detalle)
+        conciliados_amount = float(pd.to_numeric(pairs_df["monto_r"], errors="coerce").fillna(0).sum()) if not pairs_df.empty else 0.0
+        agrupados_amount = float(sum((g.get("monto_total") or 0.0) for g in approved))
+        sugeridos_amount = float(sum((g.get("monto_total") or 0.0) for g in suggested))
+        no_en_banco_amount = float(pd.to_numeric(sobrantes_p["monto"], errors="coerce").fillna(0).sum()) if not sobrantes_p.empty else 0.0
+        no_en_pilaga_amount = float(pd.to_numeric(sobrantes_b["monto"], errors="coerce").fillna(0).sum()) if not sobrantes_b.empty else 0.0
 
         summary = {
             "movimientos_pilaga": total_p,
@@ -148,8 +167,38 @@ async def reconcile_summary(request: Any) -> Response:
                 "saldo_inicial": p_saldo_inicial,
                 "saldo_final": p_saldo_final if p_saldo_final is not None else (p_saldo_inicial if p_saldo_inicial is not None else 0.0) + p_neto,
             },
+            "descomposicion": {
+                "conciliados": {"count": conc_pairs, "amount": round(conciliados_amount, 2)},
+                "agrupados": {"count": len(approved), "amount": round(agrupados_amount, 2)},
+                "sugeridos": {"count": len(suggested), "amount": round(sugeridos_amount, 2)},
+                "no_en_banco": {"count": no_en_banco, "amount": round(no_en_banco_amount, 2)},
+                "no_en_pilaga": {"count": no_en_pilaga, "amount": round(no_en_pilaga_amount, 2)},
+            },
             "diferencia_neto": round(b_neto - p_neto, 2),
+            "timings": {
+                "load_total": round(t_after_load - t_load_start, 3),
+                "pipeline_total": round(timings_pipe.get("total", 0.0), 3),
+                "pairs": round(timings_pipe.get("pairs", 0.0), 3),
+                "n1_approved": round(timings_pipe.get("n1_approved", 0.0), 3),
+                "n1_suggested": round(timings_pipe.get("n1_suggested", 0.0), 3),
+                "n1_suggested_bank_to_pilaga": round(timings_pipe.get("n1_suggested_bank_to_pilaga", 0.0), 3),
+                "total_endpoint": round(time.perf_counter() - t_start, 3),
+            },
         }
+
+        # Log rápido a stdout para perf
+        tlog = summary["timings"]
+        print(
+            "[reconcile_summary] timings"
+            f" load={tlog['load_total']}s"
+            f" pairs={tlog['pairs']}s"
+            f" n1_app={tlog['n1_approved']}s"
+            f" n1_sug={tlog['n1_suggested']}s"
+            f" n1_sug_b2p={tlog['n1_suggested_bank_to_pilaga']}s"
+            f" pipe_total={tlog['pipeline_total']}s"
+            f" total={tlog['total_endpoint']}s",
+            flush=True,
+        )
 
         return Response({"ok": True, "summary": summary}, status_code=200)
 

@@ -1,21 +1,23 @@
 <script lang="ts">
   // src/components/agui/ReconciliarResumen.svelte
   import { URL_REST } from '../global';
+  import { daysWindowStore, DEFAULT_DAYS_WINDOW, normalizeDaysWindow } from './reconcileConfig';
 
   const props = $props<{
     uriExtracto?: string;
     uriContable?: string;
-    daysWindow?: number;
   }>();
 
   const uriExtracto = $derived(props.uriExtracto ?? "");
   const uriContable = $derived(props.uriContable ?? "");
-  const daysWindowProp = $derived(props.daysWindow ?? 5);
 
-  let daysWindow = $state(daysWindowProp); // editable desde la UI
+  let daysWindow = $state(DEFAULT_DAYS_WINDOW); // editable desde la UI y compartido vía store
 
   $effect(() => {
-    daysWindow = daysWindowProp;
+    const unsubscribe = daysWindowStore.subscribe((value) => {
+      daysWindow = normalizeDaysWindow(value);
+    });
+    return () => unsubscribe();
   });
 
   const formatNumber = (value: any) => {
@@ -29,14 +31,25 @@
     }
   };
 
+  const formatCountAmount = (item: any) => {
+    if (!item) return "—";
+    const count = typeof item.count === "number" ? `${item.count} op` : "— op";
+    const amount = formatNumber(item.amount ?? null);
+    return `${count} · $${amount}`;
+  };
+
   let loading = $state(false);
   let summary: any = $state(null);
   let errorMsg: string | null = $state(null);
 
+  function setDaysWindow(value: number | string) {
+    daysWindowStore.set(normalizeDaysWindow(value));
+  }
+
   async function fetchSummary(
     uriExtr: string = uriExtracto,
     uriCont: string = uriContable,
-    windowDays: number = daysWindow ?? 5
+    windowDays: number = daysWindow ?? DEFAULT_DAYS_WINDOW
   ) {
     errorMsg = null;
     summary = null;
@@ -46,7 +59,7 @@
       const fd = new FormData();
       fd.set("uri_extracto", uriExtr || "");
       fd.set("uri_contable", uriCont || "");
-      fd.set("days_window", String(windowDays || 5));
+      fd.set("days_window", String(windowDays || DEFAULT_DAYS_WINDOW));
 
       const res = await fetch(`${URL_REST}/api/reconcile/summary`, { method: "POST", body: fd });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -63,7 +76,7 @@
   $effect(() => {
     const extr = uriExtracto;
     const cont = uriContable;
-    const windowDays = daysWindowProp;
+    const windowDays = daysWindow;
     if (!extr || !cont) {
       summary = null;
       return;
@@ -79,10 +92,11 @@
       <div class="flex gap-2 items-center">
         <input
           type="number"
-          min="0"
+          min="1"
           class="input input-bordered w-24"
           bind:value={daysWindow}
           title="Ventana de días para match"
+          on:input={(event:any) => setDaysWindow(event?.currentTarget?.value ?? daysWindow)}
         />
         <button class="btn btn-primary" on:click|preventDefault={() => fetchSummary()} disabled={loading || !uriExtracto || !uriContable} aria-busy={loading}>
           {#if loading}
@@ -168,6 +182,48 @@
           </div>
         </div>
       </div>
+
+      {#if summary?.descomposicion}
+        <div class="card bg-base-200 mt-4">
+          <div class="card-body">
+            <h4 class="font-semibold">Descomposición de movimientos</h4>
+            <p class="text-sm opacity-80">Estas cuatro categorías son disjuntas y suman el resultado del período de cada lado.</p>
+            <div class="overflow-x-auto">
+              <table class="table table-sm">
+                <thead>
+                  <tr>
+                    <th>Categoría</th>
+                    <th>Banco</th>
+                    <th>PILAGA</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td class="font-medium">Conciliados 1→1</td>
+                    <td>{formatCountAmount(summary?.descomposicion?.conciliados)}</td>
+                    <td>{formatCountAmount(summary?.descomposicion?.conciliados)}</td>
+                  </tr>
+                  <tr>
+                    <td class="font-medium">Agrupados (≤ $1)</td>
+                    <td>{formatCountAmount(summary?.descomposicion?.agrupados)}</td>
+                    <td>{formatCountAmount(summary?.descomposicion?.agrupados)}</td>
+                  </tr>
+                  <tr>
+                    <td class="font-medium">Sugeridos (>$1 y ≤ $5)</td>
+                    <td>{formatCountAmount(summary?.descomposicion?.sugeridos)}</td>
+                    <td>{formatCountAmount(summary?.descomposicion?.sugeridos)}</td>
+                  </tr>
+                  <tr>
+                    <td class="font-medium">No reflejado</td>
+                    <td>Banco no reflejado en PILAGA: {formatCountAmount(summary?.descomposicion?.no_en_pilaga)}</td>
+                    <td>PILAGA no reflejado en Banco: {formatCountAmount(summary?.descomposicion?.no_en_banco)}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      {/if}
 
       <!-- Coherencia -->
       <div class="alert mt-3" class:alert-success={(summary?.diferencia_neto ?? 0) === 0} class:alert-warning={(summary?.diferencia_neto ?? 0) !== 0}>

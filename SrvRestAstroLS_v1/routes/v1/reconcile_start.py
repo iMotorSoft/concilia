@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import os
 import re
 import traceback
 from datetime import timedelta
@@ -22,8 +23,26 @@ from urllib.parse import urlparse
 
 
 # =========================
-# Helpers (IO)
+# Helpers (IO) + cache
 # =========================
+
+# Cache simple en memoria para evitar reparsear el mismo XLSX en la misma serie de request.
+_DF_CACHE: dict[tuple, pd.DataFrame] = {}
+
+def _preferred_engine() -> str:
+    """Devuelve 'pyarrow' si está disponible (más rápido), si no openpyxl."""
+    try:
+        import pyarrow  # noqa: F401
+        return "pyarrow"
+    except Exception:
+        return "openpyxl"
+
+
+def _df_cache_key(kind: str, path: Path) -> tuple:
+    st = path.stat()
+    return (kind, str(path.resolve()), st.st_mtime_ns, st.st_size)
+
+
 def _from_file_uri(uri: str) -> Path:
     """
     Convierte file://... en Path usable.
@@ -110,7 +129,16 @@ def _load_pilaga(path: Path) -> pd.DataFrame:
     Devuelve DF con columnas estandarizadas:
         ['fecha','monto','documento','ingreso_bruto','egreso_bruto','origen']
     """
-    xls = pd.ExcelFile(str(path), engine="openpyxl")
+    cache_key = _df_cache_key("pilaga", path)
+    if cache_key in _DF_CACHE:
+        return _DF_CACHE[cache_key].copy()
+
+    engine = _preferred_engine()
+    try:
+        xls = pd.ExcelFile(str(path), engine=engine)
+    except Exception:
+        xls = pd.ExcelFile(str(path), engine="openpyxl")
+
     sheet = next((n for n in xls.sheet_names if str(n).strip().lower() == "resumen cuenta bancaria"), xls.sheet_names[0])
     raw = pd.read_excel(xls, sheet_name=sheet)
 
@@ -157,7 +185,9 @@ def _load_pilaga(path: Path) -> pd.DataFrame:
     df = df[df["monto"] != 0]
     df = df.loc[:, ["fecha", "monto", "documento", "ingreso_bruto", "egreso_bruto"]].copy()
     df["origen"] = "PILAGA"
-    return df.reset_index(drop=True)
+    df = df.reset_index(drop=True)
+    _DF_CACHE[cache_key] = df.copy()
+    return df
 
 
 def _get_extracto_saldos(path: Path) -> Tuple[Optional[float], Optional[float]]:
@@ -253,7 +283,16 @@ def _load_extracto(path: Path) -> pd.DataFrame:
     Detecta encabezado (fila con 'Fecha'), normaliza monto.
     Devuelve DF con columnas estandarizadas: ['fecha','monto','documento','origen']
     """
-    xls = pd.ExcelFile(str(path), engine="openpyxl")
+    cache_key = _df_cache_key("extracto", path)
+    if cache_key in _DF_CACHE:
+        return _DF_CACHE[cache_key].copy()
+
+    engine = _preferred_engine()
+    try:
+        xls = pd.ExcelFile(str(path), engine=engine)
+    except Exception:
+        xls = pd.ExcelFile(str(path), engine="openpyxl")
+
     sheet = next((n for n in xls.sheet_names if str(n).strip().lower() == "principal"), xls.sheet_names[0])
     raw = pd.read_excel(xls, sheet_name=sheet, header=None)
 
@@ -294,7 +333,9 @@ def _load_extracto(path: Path) -> pd.DataFrame:
     out = out.dropna(subset=["fecha"])
     out = out[out["monto"] != 0]
     out["origen"] = "EXTRACTO"
-    return out.reset_index(drop=True)
+    out = out.reset_index(drop=True)
+    _DF_CACHE[cache_key] = out.copy()
+    return out
 
 
 # =========================
@@ -364,7 +405,7 @@ async def reconcile_start(request: Any) -> Response:
       - threadId (opcional): para SSE
       - uri_extracto: file://... (obligatorio)
       - uri_contable: file://... (obligatorio)
-      - days_window: int (opcional, default 5)
+      - days_window: int (opcional, default 30)
 
     Emite por SSE:
       - {type:"RUN_START", ...}
@@ -377,7 +418,7 @@ async def reconcile_start(request: Any) -> Response:
         # Nueva versión usa uri_extracto / uri_contable. Aceptamos ambos.
         uri_extracto = form.get("extracto_original_uri") or form.get("uri_extracto") or ""
         uri_contable = form.get("contable_original_uri") or form.get("uri_contable") or ""
-        days_window = int(form.get("days_window") or 5)
+        days_window = int(form.get("days_window") or 30)
 
         if not uri_extracto or not uri_contable:
             return Response({"ok": False, "message": "Faltan URIs: uri_extracto y uri_contable son obligatorios."}, status_code=400)

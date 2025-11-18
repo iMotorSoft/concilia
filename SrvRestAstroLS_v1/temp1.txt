@@ -36,107 +36,103 @@ el error es que dice que faltan conciliar pero el monto
 
 aparece en los dos lados y es igual
 
-Por favor cualquier modificacion primero decimela y la tengo que aprobar
-
-te paso resultado
+Primero necesitos que valides contra los excel los resultados, despues que me expliques para el usuario como puede validar visualmente los totales
 
 Sumario de período
-Extracto: /media/issajar/DEVELOP/Projects/iMotorSoft/ai/dev/SpendIQ/Doc/FCE/Conciliacion/09 - EXTRACTO.xlsx
-Contable: /media/issajar/DEVELOP/Projects/iMotorSoft/ai/dev/SpendIQ/Doc/FCE/Conciliacion/09 - PILAGA.xlsx
+Extracto: /media/issajar/DEVELOP/Projects/iMotorSoft/ai/dev/SpendIQ/Doc/FCE/Conciliacion/EXTRACTO SANTANDER AGOST-SEPT.xlsx
+Contable: /media/issajar/DEVELOP/Projects/iMotorSoft/ai/dev/SpendIQ/Doc/FCE/Conciliacion/PILAGA SANTANDER AGOST -SEPT.xlsx
+
+
+*** Header
+Sumario de período
+Extracto: file:///media/issajar/DEVELOP/Projects/iMotorSoft/ai/dev/concilia/storage/incoming/EXTRACTO SANTANDER AGOST-SEPT.xlsx
+Contable: file:///media/issajar/DEVELOP/Projects/iMotorSoft/ai/dev/concilia/storage/incoming/PILAGA SANTANDER AGOST -SEPT.xlsx
 Movimientos PILAGA
-26
+1371
 Movimientos Banco
-27
+1120
 Conciliados (pares)
-24
+470
 No en Banco
-2
+901
 No en PILAGA
-3
+650
 Ventana (días)
-5
+30
 Banco — Debe / Haber
 Debe:
-$1.094.220.098,10
+$1.145.509.747,73
 Haber:
-$1.079.539.532,40
+$995.630.868,07
 Resultado del período:
-$-14.680.565,70
-Saldo inicial: $14.736.647,50
-Saldo final: $56.081,80
+$-149.878.879,66
+Saldo inicial: $289.319.077,51
+Saldo final: $139.440.197,85
 PILAGA — Ingresos / Egresos
 Ingresos:
-$1.090.984.532,40
+$980.539.821,97
 Egresos:
-$1.094.200.000,00
+$1.208.767.077,51
 Resultado del período:
-$-3.215.467,60
-Saldo inicial: $3.305.625,42
-Saldo final: $90.157,82
-Diferencia de neto (Banco - PILAGA): $-11.465.098,10
-Detalle de no conciliados
-PILAGA NO reflejado en Banco
-2
-Fecha	Monto	Documento
-2025-09-02	$ 11.445.000,00	DI01: 6479/2025
-2025-09-03	$ 5.040.000,00	DI01: 6485/2025
-Banco NO reflejado en PILAGA
-3
-Fecha	Monto	Documento
-2025-09-02	$ 5.040.000,00	6209264
-2025-09-30	-$ 16.610,00	10010930
-2025-09-30	-$ 3.488,10	10010930
+$-228.227.255,54
+Saldo inicial: $344.886.693,89
+Saldo final: $116.659.438,35
+*******************
 
-• Hallazgos
+PILAGA No reflejado en Bco 819 op 328357375.67
+Banco No reflejado en PILAGA 624 op 406705755.87
+Conciliados 1 a 1 470 pares -536543262.26
+Agrupados 26 grupos 20041368.95
+Sugeridos 0 0
 
-  - Los dos archivos traen ese importe: el extracto tiene dos filas (doc 6209261
-    y 6209264, 02/09/2025) y PILAGA tiene DI01: 6484/2025 y DI01: 6485/2025
-    (03/09/2025). El loader de la API los está leyendo bien (_load_extracto
-    y _load_pilaga), porque al correrlos en consola aparecen los cuatro
-    movimientos.
-  - El problema se genera en _match_one_to_one_by_amount_and_date_window
-    (routes/v1/reconcile_start.py:303-339). Allí se arma un merge por monto
-    y se ordena por monto, diferencia de días y los índices _row_id_*, pero
-    luego se aplican dos drop_duplicates consecutivos (primero por _row_id_p,
-    luego por _row_id_b). Con importes duplicados, ambos registros de PILAGA
-    eligen la misma fila del banco (la de _row_id_b == 6, documento 6209261)
-    porque aparece antes en el sort. Cuando se eliminan duplicados por banco,
-    se descarta el segundo match y la otra fila del banco (6209264) nunca llega
-    a emparejarse. El resultado visible es exactamente el que ves en la UI:
-    una PILAGA y un banco de $5.040.000 quedan “no conciliados” aunque sean
-    idénticos.
-  - Probé reemplazar esa sección con un greedy explícito: recorrer el dataframe
-    ordenado y aceptar un match solo si _row_id_p y _row_id_b no se usaron
-    antes. Con ese enfoque, ambos pares ($5.040.000) quedan conciliados,
-    quedando solo DI01: 6479/2025 como “no en banco” y las dos salidas del 30/09
-    como “no en PILAGA”, que coincide con la expectativa de negocio (25 pares, 1
-    sobrante PILAGA, 2 sobrantes Banco).
+Perdon no entiendo o no da
+ejemplo Pilaga no reflejado + conciliados + agrupados + sugeridos = Saldo final: $116.659.438,35
 
-  Propuesta antes de tocar código
+No da
 
-  1. Reescribir el bloque de líneas 327-330 en routes/v1/reconcile_start.py
-     para reemplazar los drop_duplicates por un bucle greedy que marque used_gl/
-     used_bank. Esto evita que dos filas terminen apuntando al mismo banco
-     cuando existan montos repetidos.
-  2. Añadir un test de regresión (p.ej. en tests/) que construya un dataframe
-     sintético con dos movimientos de igual monto por lado y verifique que la
-     función devuelve dos pares y cero sobrantes. Así aseguramos que el bug no
-     vuelva cuando se toquen heurísticas.
+Realmente quedo muy bien, pero no esta incluido los datos de
+PILAGA No reflejado en Bco 819 op 328357375.67
+Banco No reflejado en PILAGA 624 op 406705755.87
+Conciliados 1 a 1 470 pares -536543262.26
+Agrupados 26 grupos 20041368.95
+Sugeridos 0 0
 
-  Decime si aprobás estos cambios y procedo a implementarlos y a mostrarte el
-  resultado (incluyendo la corrida con tus archivos).
+Porque lo que quiero que el ususario comprende de lo movimientos en curso, que monto son conciliados, que monto es agrupados, que monto es sugeridos y los NO
 
-Si, pero por favor proba antes de implementar en el codigo es correcto, da la casualidad que son dos montos iguales pero son distintas operaciones entonces es correcto conciliarlas
+que sumando esa descomposicion debe dar los totales
 
-Necesito que hagas unas pruebas, en el contable hay varias operaciones que sumadas dan el monto que esta en el extracto bancario. pero hay que buscar un logica para saber cuales
+*************
+Por favor revisas los algoritmos, estos son todos los archivos que tenemos, pero ningun caso esta dando sugeridos, porque
 
-Te paso otro archivos para la logica, pero considerar que aveces pueden ser varios los movimientos osea N contra 1 y no solamente 2 o 3
-Extracto
-/media/issajar/DEVELOP/Projects/iMotorSoft/ai/dev/SpendIQ/Doc/FCE/Conciliacion/EXTRACTO PATAGONIA AGOST-SEPT.xlsx
+directorio
+/media/issajar/DEVELOP/Projects/iMotorSoft/ai/dev/SpendIQ/Doc/FCE/Conciliacion
+
+Extractos
+09 - EXTRACTO.xlsx (ciudad)
+EXTRACTO PATAGONIA AGOST-SEPT.xlsx
+EXTRACTO SANTANDER AGOST-SEPT.xlsx
+Extracto Ciudad julio.xlsx
 
 Contable
-/media/issajar/DEVELOP/Projects/iMotorSoft/ai/dev/SpendIQ/Doc/FCE/Conciliacion/PILAGA PATAGONIA AGOST-SEPT.xlsx
+09 - PILAGA.xlsx (ciudad)
+PILAGA PATAGONIA AGOST-SEPT.xlsx
+PILAGA SANTANDER AGOST -SEPT.xlsx
+PILAGA CIUDAD JULIO.xlsx
 
+**************
+este componente realmente no lo estoy viendo necesario lo podemos sacar, como los endpoints que llama, si es que no se usan en otro lado
+
+Resumen visual
+
+Para validar: Resultado = (sumatoria de las 4 tarjetas) y Saldo final = Saldo inicial + Resultado.
+	Banco	PILAGA
+Movimientos	1120	1371
+Saldo inicial	$289.319.077,51	$344.886.693,89
+Resultado del período	$-149.878.879,66	$-228.227.255,54
+Saldo final	$139.440.197,85	$116.659.438,35
+Brutos	Debe $1.145.509.747,73 / Haber $995.630.868,07	Ingresos $980.539.821,97 / Egresos $1.208.767.077,51
+
+primero decime que opinas
 
 
 

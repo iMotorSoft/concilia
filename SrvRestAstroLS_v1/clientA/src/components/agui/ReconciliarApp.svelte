@@ -3,6 +3,8 @@
 import { URL_REST } from '../global';
 import ReconciliarResumen from "../agui/ReconciliarResumen.svelte";
 import ReconciliarDetalle from '../agui/ReconciliarDetalle.svelte';
+import { get } from 'svelte/store';
+import { daysWindowStore, DEFAULT_DAYS_WINDOW, normalizeDaysWindow } from './reconcileConfig';
 
 
 // ===== Estado =====
@@ -109,6 +111,9 @@ function handle(msg: any) {
   if (t === "RESULTS_READY") {
     // payload.summary esperado desde /api/reconcile/start
     results = msg?.payload?.summary || null;
+    if (results?.days_window != null) {
+      daysWindowStore.set(normalizeDaysWindow(results.days_window));
+    }
     reconciling = false; // spinner OFF
     showToast("success", "Resultados listos.");
     return;
@@ -218,10 +223,12 @@ async function startReconcile() {
   reconciling = true;
 
   const fd = new FormData();
+  const currentDaysWindow = get(daysWindowStore) ?? DEFAULT_DAYS_WINDOW;
+
   fd.set("threadId", threadId);
   fd.set("uri_extracto", previewExtracto.original_uri || "");
   fd.set("uri_contable", previewContable.original_uri || "");
-  fd.set("days_window", "5");
+  fd.set("days_window", String(currentDaysWindow));
 
   try {
     const res = await fetch(`${URL_REST}/api/reconcile/start`, { method: "POST", body: fd });
@@ -233,6 +240,9 @@ async function startReconcile() {
     // El summary llega por SSE (RESULTS_READY). Como fallback mostramos si vino en el body:
     if (j?.summary && !results) {
       results = j.summary;
+      if (results?.days_window != null) {
+        daysWindowStore.set(normalizeDaysWindow(results.days_window));
+      }
       reconciling = false;
     }
   } catch {
@@ -385,14 +395,14 @@ $effect(() => {
 
 <!-- Resultados -->
 {#if results}
-  <ReconciliarResumen client:load uriExtracto={previewExtracto?.original_uri} uriContable={previewContable?.original_uri} daysWindow={results?.days_window || 5} />
+  <ReconciliarResumen client:load uriExtracto={previewExtracto?.original_uri} uriContable={previewContable?.original_uri} />
   <!-- Detalle separado, consumiendo /api/reconcile/details -->
   <ReconciliarDetalle
     urlRest={URL_REST}
     threadId={threadId}
     extractoUri={previewExtracto?.original_uri}
     contableUri={previewContable?.original_uri}
-    daysWindow={results?.days_window || 5}
+    summary={results}
     client:load
   />  
 {/if}

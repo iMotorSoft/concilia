@@ -28,6 +28,7 @@ dependencies = [
     "openpyxl>=3.1.5",
     "aiofiles>=23.2.1",
     "python-multipart>=0.0.20",
+    "polars>=1.35.2",
 ]
 
 [tool.hatch.metadata]
