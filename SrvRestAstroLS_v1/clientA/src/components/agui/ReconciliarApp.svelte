@@ -13,6 +13,7 @@ let sending   = $state(false);
 
 let dialogOpen = $state(false);
 let dialogRef: HTMLDialogElement | null = null;
+let uploadBusy = $state(false);
 
 let formSpec: any = $state(null);
 let formValues: Record<string, any> = $state({});
@@ -125,9 +126,11 @@ function handle(msg: any) {
   }
 }
 
-async function onSendText() {
-  const text = (chatInput || "").trim();
+async function onSendText(customText?: string) {
+  const text = ((customText ?? chatInput) || "").trim();
   if (!text || sending) return;
+  // Sincroniza el textarea cuando se usan accesos rápidos
+  chatInput = text;
   sending = true;
   try {
     const correlationId = crypto?.randomUUID?.() ?? `corr-${Date.now()}`;
@@ -159,6 +162,7 @@ async function onSubmitUpload() {
   if (!fileObj) { showToast("warning", "Seleccioná un archivo."); return; }
   fd.set("file", fileObj, fileObj.name);
 
+  uploadBusy = true;
   try {
     // Fallback robusto a v2 + role deducida si el backend no lo manda
     const roleDefault = formSpec?.payload?.role ?? "extracto";
@@ -169,8 +173,11 @@ async function onSubmitUpload() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const j = await res.json();
     showToast("success", j?.message || "Archivo recibido.");
+    dialogOpen = false; // cerrar modal al terminar
   } catch {
     showToast("error", "No se pudo subir el archivo.");
+  } finally {
+    uploadBusy = false;
   }
 }
 
@@ -266,6 +273,14 @@ $effect(() => {
     </div>
 
     <div class="flex flex-col gap-2">
+      <div class="flex gap-2">
+        <button class="btn btn-active btn-primary btn-xs" on:click|preventDefault={() => onSendText("subir extracto")}>
+          Subir extracto
+        </button>
+        <button class="btn btn-active btn-primary btn-xs" on:click|preventDefault={() => onSendText("subir contable")}>
+          Subir contable
+        </button>
+      </div>
       <textarea
         class="textarea textarea-bordered w-full"
         bind:value={chatInput}
@@ -300,15 +315,19 @@ $effect(() => {
         type="file"
         accept={formSpec?.fields?.[0]?.accept || ".xlsx,.xls,.csv"}
         on:change={(e:any)=>{fileObj = e?.target?.files?.[0] || null;}}
+        disabled={uploadBusy}
       />
     </div>
 
     <div class="modal-action">
-      <button class="btn btn-primary" on:click|preventDefault={onSubmitUpload}>
+      <button class="btn btn-primary" on:click|preventDefault={onSubmitUpload} disabled={uploadBusy} aria-busy={uploadBusy}>
+        {#if uploadBusy}
+          <span class="loading loading-spinner loading-sm mr-2" />
+        {/if}
         {formSpec?.submit?.label || "Subir y analizar"}
       </button>
       <form method="dialog">
-        <button class="btn" on:click={() => (dialogOpen = false)}>Cerrar</button>
+        <button class="btn" on:click={() => (dialogOpen = false)} disabled={uploadBusy}>Cerrar</button>
       </form>
     </div>
   </div>

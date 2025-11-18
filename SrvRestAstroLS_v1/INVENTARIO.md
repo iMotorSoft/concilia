@@ -125,3 +125,11 @@
 
 - `routes/v1/reconcile_start.py`: el matcher `_match_one_to_one_by_amount_and_date_window` dejó de usar `drop_duplicates` sobre `_row_id_*` y ahora aplica un recorrido greedy que asegura la relación 1:1 incluso con montos duplicados (evita que dos PILAGA apunten al mismo banco cuando las fechas están dentro de la ventana).
 - `tests/reconcile/test_matcher.py`: nuevo test de regresión que arma un escenario mínimo con dos movimientos de $5.040.000 por lado y verifica que retorna dos pares y cero sobrantes, cubriendo el bug detectado en los extractos reales.
+
+---
+
+## 11. Cambios UI recientes (chat + conciliación)
+
+- `clientA/src/components/agui/ReconciliarApp.svelte`: accesos rápidos “Subir extracto / Subir contable” junto al chat, botón de upload con spinner mientras sube y cierre automático del modal; descomposición muestra spinner hasta que hay datos.
+- `clientA/src/components/agui/ReconciliarResumen.svelte`: separó el sumario en dos fetch (head y descomposición) con timers visibles en botón “Actualizar” y en la sección de descomposición.
+- `clientA/src/components/agui/cards/*`: todas las cards de detalle ahora sólo calculan al presionar “Calcular” y muestran cronómetro mientras cargan (NoBanco, NoContable, Conciliados 1→1, Agrupados, Sugeridos).

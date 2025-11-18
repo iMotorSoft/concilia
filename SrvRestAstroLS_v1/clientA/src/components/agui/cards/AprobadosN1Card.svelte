@@ -23,13 +23,15 @@
   const ENDPOINT = "/api/reconcile/details/n1/grupos";
 
   let expanded = $state(false);
-  let loading = $state(false);
-  let errorMsg: string | null = $state(null);
-  let rows: GroupRow[] = $state([]);
-  let totalAmount: number | null = $state(null);
-  let countDisplay: number | null = $state(null);
-  let daysWindow = $state(DEFAULT_DAYS_WINDOW);
-  let lastSourceFingerprint: string | null = null;
+let loading = $state(false);
+let errorMsg: string | null = $state(null);
+let rows: GroupRow[] = $state([]);
+let totalAmount: number | null = $state(null);
+let countDisplay: number | null = $state(null);
+let daysWindow = $state(DEFAULT_DAYS_WINDOW);
+let lastSourceFingerprint: string | null = null;
+let elapsedMs = $state(0);
+let timerId: any = null;
 
   function fmtMoney(value: number | string | null | undefined) {
     if (value === null || value === undefined) return "—";
@@ -50,27 +52,23 @@
     return null;
   }
 
-  function resetState() {
-    expanded = false;
-    loading = false;
-    errorMsg = null;
-    rows = [];
-    countDisplay = null;
-    totalAmount = null;
+function resetState() {
+  expanded = false;
+  loading = false;
+  errorMsg = null;
+  rows = [];
+  countDisplay = null;
+  totalAmount = null;
+  elapsedMs = 0;
+  if (timerId) {
+    clearInterval(timerId);
+    timerId = null;
   }
-
-  function handleDaysWindowChange(newValue: number) {
-    daysWindow = newValue;
-    fetchData();
-  }
+}
 
   $effect(() => {
     const unsubscribe = daysWindowStore.subscribe((value) => {
-      const normalized = normalizeDaysWindow(value);
-      const changed = normalized !== daysWindow;
-      if (changed) {
-        handleDaysWindowChange(normalized);
-      }
+      daysWindow = normalizeDaysWindow(value);
     });
     return () => unsubscribe();
   });
@@ -82,16 +80,10 @@
     if (fingerprint === lastSourceFingerprint) return;
     lastSourceFingerprint = fingerprint;
     resetState();
-    if (extr && cont) {
-      fetchData();
-    }
   });
 
   async function toggleExpanded() {
     expanded = !expanded;
-    if (expanded && !rows.length && !loading) {
-      fetchData();
-    }
   }
 
   function sumPilaga(row: GroupRow): number {
@@ -100,15 +92,21 @@
     return Number.isFinite(s) ? s : 0;
   }
 
-  async function fetchData() {
-    if (!extractoUri || !contableUri) {
-      errorMsg = "Faltan archivos confirmados.";
-      return;
-    }
-    loading = true;
-    errorMsg = null;
-    rows = [];
-    try {
+async function fetchData() {
+  if (!extractoUri || !contableUri) {
+    errorMsg = "Faltan archivos confirmados.";
+    return;
+  }
+  expanded = true; // mostrar cuerpo mientras calcula
+  loading = true;
+  elapsedMs = 0;
+  if (timerId) clearInterval(timerId);
+  timerId = setInterval(() => {
+    elapsedMs += 100;
+  }, 100);
+  errorMsg = null;
+  rows = [];
+  try {
       const fd = new FormData();
       fd.set("uri_extracto", extractoUri || "");
       fd.set("uri_contable", contableUri || "");
@@ -125,48 +123,63 @@
       const providedTotal = typeof payload.total_amount === "number" ? payload.total_amount : null;
       const inferredTotal = rows.reduce((acc, r) => acc + (Number(r?.monto_total) || sumPilaga(r)), 0);
       totalAmount = providedTotal ?? inferredTotal;
-    } catch (err: any) {
-      errorMsg = err?.message || "No se pudo cargar el detalle.";
-      rows = [];
-      countDisplay = null;
-      totalAmount = null;
-    } finally {
-      loading = false;
+  } catch (err: any) {
+    errorMsg = err?.message || "No se pudo cargar el detalle.";
+    rows = [];
+    countDisplay = null;
+    totalAmount = null;
+  } finally {
+    loading = false;
+    if (timerId) {
+      clearInterval(timerId);
+      timerId = null;
     }
   }
+}
 </script>
 
 <article class="card bg-base-100 border border-base-300 shadow-sm">
-  <button
-    class="card-body flex items-center justify-between gap-4 cursor-pointer text-left"
-    on:click|preventDefault={toggleExpanded}
-    aria-expanded={expanded}
-  >
-    <div class="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-2">
-      <span class="font-semibold text-lg">{TITLE}</span>
-      <div class="flex flex-wrap items-center gap-2 text-sm">
-        <span class="badge badge-neutral badge-outline">{countLabel()}</span>
-        <span class="badge badge-info badge-outline">
-          {fmtMoney(displayAmount())}
-        </span>
-      </div>
-    </div>
-    <svg
-      class={"w-4 h-4 transition-transform duration-200 " + (expanded ? "rotate-180" : "")}
-      viewBox="0 0 20 20"
-      fill="none"
-      xmlns="http://www.w3.org/2000/svg"
-      aria-hidden="true"
+  <div class="card-body flex items-center justify-between gap-4">
+    <button
+      class="flex-1 flex items-center justify-between gap-4 cursor-pointer text-left"
+      on:click|preventDefault={toggleExpanded}
+      aria-expanded={expanded}
     >
-      <path d="M5 12l5-5 5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
-    </svg>
-  </button>
+      <div class="flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-2">
+        <span class="font-semibold text-lg">{TITLE}</span>
+        <div class="flex flex-wrap items-center gap-2 text-sm">
+          <span class="badge badge-neutral badge-outline">{countLabel()}</span>
+          <span class="badge badge-info badge-outline">
+            {fmtMoney(displayAmount())}
+          </span>
+        </div>
+      </div>
+      <svg
+        class={"w-4 h-4 transition-transform duration-200 " + (expanded ? "rotate-180" : "")}
+        viewBox="0 0 20 20"
+        fill="none"
+        xmlns="http://www.w3.org/2000/svg"
+        aria-hidden="true"
+      >
+        <path d="M5 12l5-5 5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+      </svg>
+    </button>
+    <button
+      class="btn btn-primary btn-xs"
+      on:click|preventDefault|stopPropagation={fetchData}
+      disabled={loading}
+      aria-busy={loading}
+    >
+      {#if loading}Calculando…{:else}Calcular{/if}
+    </button>
+  </div>
 
   {#if expanded}
     <div class="px-6 pb-6 -mt-2 space-y-3">
       {#if loading}
         <div class="flex items-center gap-2 text-sm opacity-80">
-          <span class="loading loading-spinner loading-sm" /> Cargando detalle…
+          <span class="loading loading-spinner loading-sm" aria-hidden="true" />
+          <span>Cargando detalle… {(elapsedMs/1000).toFixed(1)}s</span>
         </div>
       {:else if errorMsg}
         <div class="alert alert-error">{errorMsg}</div>

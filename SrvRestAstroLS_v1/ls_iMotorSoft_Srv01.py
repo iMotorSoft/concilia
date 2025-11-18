@@ -32,7 +32,11 @@ from routes.v1.reconcile_details import (
     reconcile_details_n1_grupos,
     reconcile_details_n1_sugeridos,  # <--- NUEVO
 )  # <--- NUEVO
-from routes.v1.reconcile_summary import reconcile_summary  # NUEVO
+from routes.v1.reconcile_summary import (
+    reconcile_summary,              # resumen completo (compatibilidad)
+    reconcile_summary_head,         # solo head (totales)
+    reconcile_summary_descomposicion,  # solo descomposición
+)  # NUEVO
 
 
 
@@ -50,6 +54,8 @@ route_handlers = [
     reconcile_details_n1_grupos,  # endpoint específico por card (Agrupados aprobados)
     reconcile_details_n1_sugeridos,  # endpoint específico por card (Sugeridos N→1)
     reconcile_summary,      # montamos reconcile_summary
+    reconcile_summary_head,  # montamos head
+    reconcile_summary_descomposicion,  # montamos descomposición
 ]
 
 
