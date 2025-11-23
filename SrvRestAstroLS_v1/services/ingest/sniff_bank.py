@@ -42,7 +42,11 @@ TABLE_HEADER_HINTS = (
     "BENEFICIARIO", "INGRESOS", "EGRESOS", "ACUMULADO",
 )
 EXCLUDE_TEXT_HINTS = ("SALDO INICIAL", "SALDO FINAL")
-PILAGA_HEADER_KEYWORDS = ("RESUMEN CUENTA BANCARIA",)
+PILAGA_HEADER_KEYWORDS = (
+    "RESUMEN CUENTA BANCARIA",
+    "RESUMEN CUENTA TESORERIA",
+    "RESUMEN CUENTA TESORERÍA",
+)
 
 # ===== Safe wrapper pública =====
 def sniff_file(path: Path | str, filename_hint: Optional[str] = None) -> dict:
@@ -104,6 +108,8 @@ def sniff_excel(path: Path, filename_hint: Optional[str]) -> dict:
     period_from = header_from or min_date_tab
     period_to   = header_to   or max_date_tab
 
+    validation: Optional[dict] = None
+
     # === FAST PATH para CONTABLE (PILAGA) con pandas ===
     if kind == "gl":
         fmin, fmax = fast_pilaga_period_pandas(path)
@@ -113,6 +119,7 @@ def sniff_excel(path: Path, filename_hint: Optional[str]) -> dict:
             ws_min, ws_max = scan_worksheet_dates(path)
             period_from = period_from or ws_min
             period_to   = period_to   or ws_max
+        validation = validate_gl_pilaga(path)
     else:
         # Extractos: si faltan, escaneo general
         if not (period_from and period_to):
@@ -120,12 +127,26 @@ def sniff_excel(path: Path, filename_hint: Optional[str]) -> dict:
             period_from = period_from or ws_min
             period_to   = period_to   or ws_max
 
+        # Validación de extracto (estructura mínima)
+        validation = validate_bank_extract(path, header_from=header_from, header_to=header_to)
+
         # Re-chequeo: si por nombre/columnas es PILAGA, forzamos gl
         if looks_like_pilaga(header_excerpt, grid, first_sheet_name, cols_preview):
             kind = "gl"
             fmin, fmax = fast_pilaga_period_pandas(path)
             if fmin and fmax:
                 period_from, period_to = fmin, fmax
+
+    # Si tenemos validación (extracto o contable) y rango real por filas, priorizarlo en period_from/to
+    if validation and validation.get("period_rows"):
+        pr = validation.get("period_rows") or {}
+        pr_from = pr.get("from") or None
+        pr_to   = pr.get("to") or None
+        period_from = pr_from or period_from
+        period_to   = pr_to or period_to
+
+    if kind not in ("bank_movements", "gl"):
+        validation = None
 
     # Banco por mapeo o por texto de header / filename
     bank = None
@@ -170,7 +191,10 @@ def sniff_excel(path: Path, filename_hint: Optional[str]) -> dict:
             "bank": bank is None,
             "account_id": False,
             "period_range": not (period_from and period_to),
+            "valid_extracto": validation is not None and kind == "bank_movements" and validation.get("is_valid") is False,
+            "valid_contable": validation is not None and kind == "gl" and validation.get("is_valid") is False,
         },
+        "validation": validation,
     }
     return out
 
@@ -332,6 +356,282 @@ def header_extract_period(grid: list[list[str]]) -> tuple[Optional[str], Optiona
     from_val = header_find_value(grid, "Fecha desde")
     to_val   = header_find_value(grid, "Fecha hasta")
     return parse_dmy(from_val), parse_dmy(to_val)
+
+# ===== Validación extracto bancario =====
+def _norm_cell(val: Any) -> str:
+    if val is None:
+        return ""
+    return re.sub(r"\s+", " ", str(val).strip()).upper()
+
+def _is_empty(val: Any) -> bool:
+    if val is None:
+        return True
+    if isinstance(val, str) and val.strip() == "":
+        return True
+    return False
+
+def _is_bank_header_row(cells_norm: list[str]) -> bool:
+    if not cells_norm:
+        return False
+    has_concept = any("CONCEPTO" in c or "COD.OP" in c for c in cells_norm)
+    has_fecha   = any(c.startswith("FECHA") for c in cells_norm)
+    has_importe = any("IMPORTE" in c or "DEBIT" in c or "CR" in c or "MONTO" in c for c in cells_norm)
+    has_saldo   = any("SALDO" in c for c in cells_norm)
+    score = sum([has_concept, has_fecha, has_importe, has_saldo])
+    return has_fecha and score >= 3
+
+def find_bank_header_row(ws, max_rows: int = 80) -> tuple[Optional[int], list[str]]:
+    for idx, row in enumerate(ws.iter_rows(min_row=1, max_row=max_rows, values_only=True), 1):
+        norm = [_norm_cell(c) for c in row]
+        if _is_bank_header_row(norm):
+            # Devolver también la forma original (legible)
+            original = [str(c).strip() if c not in (None, "") else "" for c in row]
+            return idx, original
+    return None, []
+
+def _find_col_index(header: list[str], keyword: str) -> Optional[int]:
+    key = keyword.upper()
+    for i, c in enumerate(header):
+        up = _norm_cell(c)
+        if not up:
+            continue
+        if key in up or up.startswith(key):
+            return i
+    return None
+
+def scan_bank_movements(ws, header_row: int, col_fecha: Optional[int], col_saldo: Optional[int], max_rows: int = 5000) -> dict:
+    rows_count = 0
+    min_d: Optional[date] = None
+    max_d: Optional[date] = None
+    last_saldo_value: Any = None
+    has_saldo_final = False
+    saldo_final_value: Any = None
+
+    max_row_bound = max_rows + header_row
+    for idx, row in enumerate(ws.iter_rows(min_row=header_row + 1, max_row=max_row_bound, values_only=True), header_row + 1):
+        cleaned = [c.strip() if isinstance(c, str) else c for c in row]
+        if all(_is_empty(c) for c in cleaned):
+            continue
+
+        # Saldo Final como línea separada
+        if any(isinstance(c, str) and "SALDO FINAL" in c.upper() for c in cleaned if c):
+            has_saldo_final = True
+            if col_saldo is not None and col_saldo < len(cleaned):
+                saldo_final_value = cleaned[col_saldo]
+            continue
+
+        # Movimientos: debemos tener fecha
+        dt: Optional[date] = None
+        if col_fecha is not None and col_fecha < len(cleaned):
+            dt = _as_date(cleaned[col_fecha])
+
+        if not dt:
+            continue
+
+        rows_count += 1
+        min_d = dt if (min_d is None or dt < min_d) else min_d
+        max_d = dt if (max_d is None or dt > max_d) else max_d
+
+        if col_saldo is not None and col_saldo < len(cleaned):
+            val = cleaned[col_saldo]
+            if not _is_empty(val):
+                last_saldo_value = val
+
+    return {
+        "rows_count": rows_count,
+        "min_date": min_d.isoformat() if min_d else None,
+        "max_date": max_d.isoformat() if max_d else None,
+        "has_saldo_final": has_saldo_final,
+        "saldo_final_value": saldo_final_value,
+        "last_saldo_value": last_saldo_value,
+    }
+
+def _parse_iso_date(s: Optional[str]) -> Optional[date]:
+    if not s:
+        return None
+    try:
+        return date.fromisoformat(s)
+    except Exception:
+        return None
+
+def validate_bank_extract(path: Path, header_from: Optional[str], header_to: Optional[str]) -> dict:
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    if not load_workbook:
+        errors.append("No se pudo validar el Excel (falta openpyxl).")
+        return {"is_valid": False, "errors": errors, "warnings": warnings}
+
+    header_row: Optional[int] = None
+    header_cols: list[str] = []
+    scan: dict = {}
+
+    try:
+        wb = load_workbook(filename=str(path), read_only=True, data_only=True)
+        ws = wb.worksheets[0]
+
+        header_row, header_cols = find_bank_header_row(ws)
+        if header_row is None:
+            errors.append("No se encontró la cabecera del extracto (Concepto/Fecha/Importe/Saldo).")
+            wb.close()
+            return {"is_valid": False, "errors": errors, "warnings": warnings}
+
+        idx_fecha = _find_col_index(header_cols, "FECHA")
+        idx_importe = _find_col_index(header_cols, "IMPORTE")
+        idx_saldo = _find_col_index(header_cols, "SALDO")
+
+        if idx_fecha is None or idx_importe is None:
+            errors.append("Faltan columnas obligatorias (Fecha / Importe) en la cabecera.")
+        if idx_saldo is None:
+            warnings.append("Columna de Saldo no encontrada; se usará último saldo disponible si existe.")
+
+        scan = scan_bank_movements(ws, header_row, idx_fecha, idx_saldo)
+        wb.close()
+    except Exception as e:
+        errors.append(f"No se pudo validar: {type(e).__name__}: {e}")
+        return {"is_valid": False, "errors": errors, "warnings": warnings}
+
+    # Sin movimientos -> inválido
+    if scan.get("rows_count", 0) <= 0:
+        errors.append("No se encontraron movimientos después de la cabecera.")
+
+    # Comparar periodos declarados vs filas
+    h_from_d = _parse_iso_date(header_from)
+    h_to_d   = _parse_iso_date(header_to)
+    r_from_d = _parse_iso_date(scan.get("min_date"))
+    r_to_d   = _parse_iso_date(scan.get("max_date"))
+
+    if (h_from_d and r_from_d) and r_from_d < h_from_d:
+        warnings.append(f"El primer movimiento ({r_from_d}) es anterior a 'Fecha desde' ({h_from_d}).")
+    if (h_to_d and r_to_d) and r_to_d > h_to_d:
+        warnings.append(f"El último movimiento ({r_to_d}) es posterior a 'Fecha hasta' ({h_to_d}).")
+    if not h_from_d or not h_to_d:
+        warnings.append("Faltan 'Fecha desde' o 'Fecha hasta' en el encabezado.")
+
+    if not scan.get("has_saldo_final"):
+        warnings.append("No se encontró la línea 'Saldo Final'; se usará el último saldo disponible.")
+
+    is_valid = len(errors) == 0
+
+    return {
+        "is_valid": is_valid,
+        "errors": errors,
+        "warnings": warnings,
+        "header_row": header_row,
+        "header_columns": header_cols,
+        "period_header": {"from": header_from, "to": header_to},
+        "period_rows": {"from": scan.get("min_date"), "to": scan.get("max_date")},
+        "rows_count": scan.get("rows_count"),
+        "has_saldo_final": scan.get("has_saldo_final"),
+        "saldo_final_value": scan.get("saldo_final_value"),
+        "last_saldo_value": scan.get("last_saldo_value"),
+    }
+
+# ===== Validación contable (PILAGA-like) =====
+def find_pilaga_header_row(ws, max_rows: int = 120) -> tuple[Optional[int], list[str]]:
+    for idx, row in enumerate(ws.iter_rows(min_row=1, max_row=max_rows, values_only=True), 1):
+        if not row:
+            continue
+        upper = [_norm_cell(c) for c in row]
+        if any("FECHA" in c for c in upper) and (any("INGRES" in c for c in upper) or any("EGRES" in c for c in upper) or any("ACUMULADO" in c for c in upper)):
+            original = [str(c).strip() if c not in (None, "") else "" for c in row]
+            return idx, original
+    return None, []
+
+def scan_pilaga_rows(ws, header_row: int, idx_fecha: Optional[int], idx_ing: Optional[int], idx_egr: Optional[int], idx_acu: Optional[int], max_rows: int = 60000) -> dict:
+    rows_count = 0
+    min_d: Optional[date] = None
+    max_d: Optional[date] = None
+    last_acum: Any = None
+
+    max_row_bound = max_rows + header_row
+    for row in ws.iter_rows(min_row=header_row + 1, max_row=max_row_bound, values_only=True):
+        if all(_is_empty(c) for c in row):
+            continue
+
+        dt: Optional[date] = None
+        if idx_fecha is not None and idx_fecha < len(row):
+            dt = _as_date(row[idx_fecha])
+        if not dt:
+            continue
+
+        rows_count += 1
+        min_d = dt if (min_d is None or dt < min_d) else min_d
+        max_d = dt if (max_d is None or dt > max_d) else max_d
+
+        if idx_acu is not None and idx_acu < len(row):
+            val = row[idx_acu]
+            if not _is_empty(val):
+                last_acum = val
+
+    return {
+        "rows_count": rows_count,
+        "min_date": min_d.isoformat() if min_d else None,
+        "max_date": max_d.isoformat() if max_d else None,
+        "last_acum_value": last_acum,
+    }
+
+def validate_gl_pilaga(path: Path) -> dict:
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    if not load_workbook:
+        errors.append("No se pudo validar el Excel (falta openpyxl).")
+        return {"is_valid": False, "errors": errors, "warnings": warnings}
+
+    header_row: Optional[int] = None
+    header_cols: list[str] = []
+    scan: dict = {}
+
+    try:
+        wb = load_workbook(filename=str(path), read_only=True, data_only=True)
+        ws = wb.worksheets[0]
+
+        header_row, header_cols = find_pilaga_header_row(ws)
+        if header_row is None:
+            errors.append("No se encontró la cabecera contable (Fecha / Ingresos / Egresos / Acumulado).")
+            wb.close()
+            return {"is_valid": False, "errors": errors, "warnings": warnings}
+
+        def _find_idx(label: str) -> Optional[int]:
+            lab = label.upper()
+            for i,c in enumerate(header_cols):
+                up = _norm_cell(c)
+                if lab in up:
+                    return i
+            return None
+
+        idx_fecha = _find_idx("FECHA")
+        idx_ing   = _find_idx("INGRES")
+        idx_egr   = _find_idx("EGRES")
+        idx_acu   = _find_idx("ACUM")
+
+        if idx_fecha is None:
+            errors.append("Falta columna Fecha en la cabecera contable.")
+
+        if idx_ing is None and idx_egr is None and idx_acu is None:
+            warnings.append("No se encontraron columnas de Ingresos/Egresos/Acumulado.")
+
+        scan = scan_pilaga_rows(ws, header_row, idx_fecha, idx_ing, idx_egr, idx_acu)
+        wb.close()
+    except Exception as e:
+        errors.append(f"No se pudo validar contable: {type(e).__name__}: {e}")
+        return {"is_valid": False, "errors": errors, "warnings": warnings}
+
+    if scan.get("rows_count", 0) <= 0:
+        errors.append("No se encontraron movimientos después de la cabecera contable.")
+
+    is_valid = len(errors) == 0
+    return {
+        "is_valid": is_valid,
+        "errors": errors,
+        "warnings": warnings,
+        "header_row": header_row,
+        "header_columns": header_cols,
+        "period_rows": {"from": scan.get("min_date"), "to": scan.get("max_date")},
+        "rows_count": scan.get("rows_count"),
+        "last_acum_value": scan.get("last_acum_value"),
+    }
 
 # ===== Limpieza y parse de fechas =====
 def clean_date_text(s: Optional[str]) -> Optional[str]:

@@ -17,6 +17,24 @@ import globalVar as Var
 from .agui_notify import emit
 from services.ingest.sniff_bank import sniff_file
 
+def _merge_validation_for_role(intel: dict, role: str) -> dict | None:
+    """Combina la validación base con un error de tipo si role != kind detectado."""
+    base = intel.get("validation") or None
+    kind = (intel.get("kind") or "").lower()
+    mismatch_error: str | None = None
+    if role == "extracto" and kind and kind != "bank_movements":
+        mismatch_error = f"Se detectó tipo '{kind}' y no parece extracto bancario."
+    if role == "contable" and kind and kind != "gl":
+        mismatch_error = f"Se detectó tipo '{kind}' y no parece contable/PILAGA."
+
+    if not mismatch_error:
+        return base
+
+    errors = list(base.get("errors") or []) if base else []
+    warnings = list(base.get("warnings") or []) if base else []
+    errors.append(mismatch_error)
+    return {"is_valid": False, "errors": errors, "warnings": warnings}
+
 
 async def _handle_upload(request: Any, role_required: Optional[str] = None, path_label: str = "v2") -> Response:
     try:
@@ -68,6 +86,12 @@ async def _handle_upload(request: Any, role_required: Optional[str] = None, path
         # 3) Sniff de contenido
         intel = sniff_file(dst, filename_hint=filename)
         source_file_id = str(uuid4())
+        validation = _merge_validation_for_role(intel, role)
+        needs = dict(intel.get("needs", {}))
+        if validation is not None and validation.get("is_valid") is False and role == "extracto":
+            needs["valid_extracto"] = True
+        if validation is not None and validation.get("is_valid") is False and role == "contable":
+            needs["valid_contable"] = True
 
         # 4) Emitir preview al topic por SSE
         if threadId:
@@ -87,8 +111,9 @@ async def _handle_upload(request: Any, role_required: Optional[str] = None, path
                     },
                     "table": intel.get("table", {}),
                     "suggest": intel.get("suggest", {}),
-                    "needs": intel.get("needs", {}),
+                    "needs": needs,
                     "kind": intel.get("kind"),
+                    "validation": validation or intel.get("validation"),
                     "meta": {
                         "bytes_written": bytes_written,
                         "filename": filename,

@@ -124,10 +124,10 @@ def _clean_money(s: pd.Series) -> pd.Series:
 
 def _load_pilaga(path: Path) -> pd.DataFrame:
     """
-    Lee PILAGA (hoja 'Resumen cuenta bancaria' o la primera),
-    con columnas: fecha, documento, ingreso, egreso -> monto (ingreso - egreso).
-    Devuelve DF con columnas estandarizadas:
-        ['fecha','monto','documento','ingreso_bruto','egreso_bruto','origen']
+    Lee PILAGA (hojas típicas: “Resumen cuenta bancaria” o “Resumen cuenta tesorería”, si no la primera).
+    Busca la fila de cabecera por la palabra “Fecha” y columnas Ingresos/Egresos/Acumulado.
+    Devuelve DF estandarizado:
+      ['fecha','monto','documento','ingreso_bruto','egreso_bruto','origen']
     """
     cache_key = _df_cache_key("pilaga", path)
     if cache_key in _DF_CACHE:
@@ -139,55 +139,84 @@ def _load_pilaga(path: Path) -> pd.DataFrame:
     except Exception:
         xls = pd.ExcelFile(str(path), engine="openpyxl")
 
-    sheet = next((n for n in xls.sheet_names if str(n).strip().lower() == "resumen cuenta bancaria"), xls.sheet_names[0])
-    raw = pd.read_excel(xls, sheet_name=sheet)
+    # Elegir hoja contable conocida
+    sheet = next(
+        (
+            n for n in xls.sheet_names
+            if "resumen cuenta bancaria" in str(n).strip().lower()
+            or "resumen cuenta tesorer" in str(n).strip().lower()
+        ),
+        xls.sheet_names[0],
+    )
 
-    # Intento directo por nombres que nos pasaste
-    cols_map_options = [
-        # Caso que nos compartiste
-        {"fecha": "Resumen cuenta bancaria", "doc": "Unnamed: 1", "ing": "Unnamed: 8", "egr": "Unnamed: 9"},
-        # Variante frecuente (por si cambia el nombre de la primera col)
-        {"fecha": raw.columns[0], "doc": "Unnamed: 1", "ing": "Unnamed: 8", "egr": "Unnamed: 9"},
-    ]
+    # Leemos sin header para poder detectar la fila con "Fecha"
+    raw = pd.read_excel(xls, sheet_name=sheet, header=None)
 
-    fecha_col = doc_col = ing_col = egr_col = None
-    for m in cols_map_options:
-        try:
-            _ = raw[m["fecha"]]  # fuerza KeyError si no existe
-            _ = raw[m["doc"]]
-            _ = raw[m["ing"]]
-            _ = raw[m["egr"]]
-            fecha_col, doc_col, ing_col, egr_col = m["fecha"], m["doc"], m["ing"], m["egr"]
+    header_idx = None
+    header_row = None
+    for idx in range(min(len(raw), 40)):  # primeras filas
+        row_vals = raw.iloc[idx].tolist()
+        norm = [str(c).strip().upper() for c in row_vals if not (pd.isna(c) or str(c).strip() == "")]
+        if any("FECHA" in c for c in norm) and (any("INGRES" in c for c in norm) or any("EGRES" in c for c in norm) or any("ACUM" in c for c in norm)):
+            header_idx = idx
+            header_row = row_vals
             break
-        except Exception:
-            continue
 
-    if not fecha_col:
-        # Heurística mínima: tomar 1ra col como fecha, y las dos últimas como ingreso/egreso si son numéricas
-        fecha_col = raw.columns[0]
-        last2 = raw.columns[-2:]
-        ing_col, egr_col = last2[0], last2[1]
-        # documento como la 2da si existe
-        doc_col = raw.columns[1] if len(raw.columns) > 1 else raw.columns[0]
+    if header_idx is None:
+        # fallback: primera fila como header
+        header_idx = 0
+        header_row = raw.iloc[0].tolist()
 
-    ingreso = pd.to_numeric(raw[ing_col], errors="coerce").fillna(0.0)
-    egreso = pd.to_numeric(raw[egr_col], errors="coerce").fillna(0.0)
+    def _clean_col_name(val, idx) -> str:
+        if pd.isna(val):
+            return f"col_{idx}"
+        s = str(val).strip()
+        return s if s else f"col_{idx}"
 
-    df = pd.DataFrame({
-        "fecha": pd.to_datetime(raw[fecha_col], dayfirst=True, errors="coerce"),
-        "documento": raw[doc_col].astype(str),
+    columns = [_clean_col_name(c, i) for i, c in enumerate(header_row)]
+    df = raw.iloc[header_idx + 1 :].copy()
+    df.columns = columns
+
+    # Quitar columnas completamente vacías
+    df = df.dropna(axis=1, how="all")
+
+    # Localizar columnas clave
+    def _find_col(substrs):
+        subs = [s.lower() for s in substrs]
+        for c in df.columns:
+            low = str(c).lower()
+            if any(s in low for s in subs):
+                return c
+        return None
+
+    fecha_col = _find_col(["fecha"])
+    doc_col   = _find_col(["doc", "detalle"]) or (df.columns[1] if len(df.columns) > 1 else df.columns[0])
+    ing_col   = _find_col(["ingres"])
+    egr_col   = _find_col(["egres"])
+    acu_col   = _find_col(["acum"])
+
+    ingreso = _clean_money(df[ing_col]) if ing_col else pd.Series([0.0] * len(df))
+    egreso  = _clean_money(df[egr_col]) if egr_col else pd.Series([0.0] * len(df))
+
+    fechas = pd.to_datetime(df[fecha_col], dayfirst=True, errors="coerce") if fecha_col else pd.to_datetime([], errors="coerce")
+    monto = ingreso - egreso
+
+    out = pd.DataFrame({
+        "fecha": fechas,
+        "monto": monto,
+        "documento": df[doc_col].astype(str) if doc_col in df else "",
         "ingreso_bruto": ingreso,
         "egreso_bruto": egreso,
     })
-    df["monto"] = df["ingreso_bruto"] - df["egreso_bruto"]
-    df = df.dropna(subset=["fecha"])
-    df = df[df["monto"].notna()]
-    df = df[df["monto"] != 0]
-    df = df.loc[:, ["fecha", "monto", "documento", "ingreso_bruto", "egreso_bruto"]].copy()
-    df["origen"] = "PILAGA"
-    df = df.reset_index(drop=True)
-    _DF_CACHE[cache_key] = df.copy()
-    return df
+
+    out = out.dropna(subset=["fecha"])
+    out = out[out["monto"].notna()]
+    out = out[out["monto"] != 0]
+    out = out.loc[:, ["fecha", "monto", "documento", "ingreso_bruto", "egreso_bruto"]].copy()
+    out["origen"] = "PILAGA"
+    out = out.reset_index(drop=True)
+    _DF_CACHE[cache_key] = out.copy()
+    return out
 
 
 def _get_extracto_saldos(path: Path) -> Tuple[Optional[float], Optional[float]]:

@@ -342,6 +342,34 @@ $effect(() => {
         <span class="badge">bank_movements</span>
       </div>
 
+      {#if previewExtracto?.validation}
+        {#if previewExtracto.validation.is_valid === false}
+          <div class="alert alert-error text-sm mt-2">
+            <div>
+              <span class="font-semibold">El archivo no pasa validación de extracto.</span>
+              {#if (previewExtracto.validation.errors || []).length}
+                <ul class="list-disc ml-6">
+                  {#each previewExtracto.validation.errors as err}
+                    <li>{err}</li>
+                  {/each}
+                </ul>
+              {/if}
+            </div>
+          </div>
+        {:else}
+          <div class="alert alert-success text-sm mt-2">
+            <span>Estructura de extracto detectada.</span>
+            {#if (previewExtracto.validation.warnings || []).length}
+              <ul class="list-disc ml-6">
+                {#each previewExtracto.validation.warnings as warn}
+                  <li>{warn}</li>
+                {/each}
+              </ul>
+            {/if}
+          </div>
+        {/if}
+      {/if}
+
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm mt-1">
         <div><span class="opacity-70">Banco:</span> <b>{previewExtracto?.detected?.bank || "—"}</b></div>
         <div><span class="opacity-70">Cuenta:</span> <b>{previewExtracto?.detected?.account_full || previewExtracto?.detected?.account_core_dv || "—"}</b></div>
@@ -354,7 +382,7 @@ $effect(() => {
 
       <div class="mt-3 flex gap-2 items-center">
         {#if !previewExtracto?.confirmed}
-          <button class="btn btn-primary" on:click|preventDefault={()=>onConfirmPreview("extracto")} disabled={confirmBusyExtracto}>
+          <button class="btn btn-primary" on:click|preventDefault={()=>onConfirmPreview("extracto")} disabled={confirmBusyExtracto || (previewExtracto?.validation?.is_valid === false)}>
             {#if confirmBusyExtracto}<span class="loading loading-spinner loading-sm mr-2" />{:else}Confirmar y procesar{/if}
           </button>
         {:else}
@@ -385,9 +413,37 @@ $effect(() => {
         </div>
       </div>
 
+      {#if previewContable?.validation}
+        {#if previewContable.validation.is_valid === false}
+          <div class="alert alert-error text-sm mt-2">
+            <div>
+              <span class="font-semibold">El archivo no pasa validación contable.</span>
+              {#if (previewContable.validation.errors || []).length}
+                <ul class="list-disc ml-6">
+                  {#each previewContable.validation.errors as err}
+                    <li>{err}</li>
+                  {/each}
+                </ul>
+              {/if}
+            </div>
+          </div>
+        {:else}
+          <div class="alert alert-success text-sm mt-2">
+            <span>Formato contable detectado.</span>
+            {#if (previewContable.validation.warnings || []).length}
+              <ul class="list-disc ml-6">
+                {#each previewContable.validation.warnings as warn}
+                  <li>{warn}</li>
+                {/each}
+              </ul>
+            {/if}
+          </div>
+        {/if}
+      {/if}
+
       <div class="mt-3 flex gap-2 items-center">
         {#if !previewContable?.confirmed}
-          <button class="btn btn-primary" on:click|preventDefault={()=>onConfirmPreview("contable")} disabled={confirmBusyContable}>
+          <button class="btn btn-primary" on:click|preventDefault={()=>onConfirmPreview("contable")} disabled={confirmBusyContable || (previewContable?.validation?.is_valid === false)}>
             {#if confirmBusyContable}<span class="loading loading-spinner loading-sm mr-2" />{:else}Confirmar y procesar{/if}
           </button>
         {:else}

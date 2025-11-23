@@ -302,6 +302,34 @@
     <div class="card-body">
       <h3 class="font-semibold text-lg">Vista previa de ingestión</h3>
 
+      {#if preview?.validation}
+        {#if preview.validation.is_valid === false}
+          <div class="alert alert-error text-sm">
+            <div>
+              <span class="font-semibold">El archivo no pasa validación de extracto.</span>
+              {#if (preview.validation.errors || []).length}
+                <ul class="list-disc ml-6">
+                  {#each preview.validation.errors as err}
+                    <li>{err}</li>
+                  {/each}
+                </ul>
+              {/if}
+            </div>
+          </div>
+        {:else}
+          <div class="alert alert-success text-sm">
+            <span>Estructura de extracto detectada correctamente.</span>
+            {#if (preview.validation.warnings || []).length}
+              <ul class="list-disc ml-6">
+                {#each preview.validation.warnings as warn}
+                  <li>{warn}</li>
+                {/each}
+              </ul>
+            {/if}
+          </div>
+        {/if}
+      {/if}
+
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
         <div>
           <span class="opacity-70">Tipo:</span>
@@ -339,7 +367,7 @@
       {/if}
 
       <div class="mt-3 flex gap-2">
-        <button class="btn btn-primary" on:click|preventDefault={onConfirmPreview} disabled={confirmBusy}>
+        <button class="btn btn-primary" on:click|preventDefault={onConfirmPreview} disabled={confirmBusy || (preview?.validation?.is_valid === false)}>
           {#if confirmBusy}<span class="loading loading-spinner loading-sm mr-2" />{:else}Confirmar y procesar{/if}
         </button>
         <button class="btn btn-ghost" on:click={() => (preview = null)}>Descartar</button>

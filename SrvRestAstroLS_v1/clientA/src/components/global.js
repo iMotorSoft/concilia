@@ -9,7 +9,7 @@ export const URL = '/clientA/dist/workspace/index.html'
 const URL_REST_DEV = 'http://localhost:7058' // 'http://localhost:7018  https://judaismoenvivo.com
 const URL_REST_PRO = 'https://fce.concilia.imotorsoft.com' // 'http://localhost:7018  https://judaismoenvivo.com
 
-export const URL_REST = URL_REST_DEV
+export const URL_REST = URL_REST_PRO
 
 const CLOUDFLARE_SITEKEY_DEV = "0x4AAAAAAA9n8PW8yOWCn_6j"
 const CLOUDFLARE_SITEKEY_PRO = "0x4AAAAAAA9glDuv7vktGmhn"

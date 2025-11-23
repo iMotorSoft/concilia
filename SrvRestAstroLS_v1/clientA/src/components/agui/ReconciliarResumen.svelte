@@ -11,11 +11,14 @@
   const uriExtracto = $derived(props.uriExtracto ?? "");
   const uriContable = $derived(props.uriContable ?? "");
 
-  let daysWindow = $state(DEFAULT_DAYS_WINDOW); // editable desde la UI y compartido vía store
+  let daysWindow = $state(DEFAULT_DAYS_WINDOW); // editable por input
+  let appliedDaysWindow = $state(DEFAULT_DAYS_WINDOW); // último valor aplicado con botón
 
   $effect(() => {
     const unsubscribe = daysWindowStore.subscribe((value) => {
-      daysWindow = normalizeDaysWindow(value);
+      const v = normalizeDaysWindow(value);
+      daysWindow = v;
+      appliedDaysWindow = v;
     });
     return () => unsubscribe();
   });
@@ -49,14 +52,10 @@
   let refreshElapsedMs = $state(0);
   let refreshTimer: any = null;
 
-  function setDaysWindow(value: number | string) {
-    daysWindowStore.set(normalizeDaysWindow(value));
-  }
-
   async function fetchSummaryHead(
     uriExtr: string = uriExtracto,
     uriCont: string = uriContable,
-    windowDays: number = daysWindow ?? DEFAULT_DAYS_WINDOW
+    windowDays: number = appliedDaysWindow ?? DEFAULT_DAYS_WINDOW
   ) {
     errorHead = null;
     summaryHead = null;
@@ -83,7 +82,7 @@
   async function fetchDescomposicion(
     uriExtr: string = uriExtracto,
     uriCont: string = uriContable,
-    windowDays: number = daysWindow ?? DEFAULT_DAYS_WINDOW
+    windowDays: number = appliedDaysWindow ?? DEFAULT_DAYS_WINDOW
   ) {
     errorDescomp = null;
     descomposicion = null;
@@ -116,24 +115,25 @@
     }
   }
 
-  async function refreshAll() {
+  async function refreshAll(windowDays: number = appliedDaysWindow ?? DEFAULT_DAYS_WINDOW) {
+    appliedDaysWindow = normalizeDaysWindow(windowDays);
     refreshElapsedMs = 0;
     if (refreshTimer) clearInterval(refreshTimer);
     refreshTimer = setInterval(() => {
       refreshElapsedMs += 100;
     }, 100);
-    await fetchSummaryHead();
-    await fetchDescomposicion();
+    await fetchSummaryHead(uriExtracto, uriContable, windowDays);
+    await fetchDescomposicion(uriExtracto, uriContable, windowDays);
     if (refreshTimer) {
       clearInterval(refreshTimer);
       refreshTimer = null;
     }
   }
 
+  let lastUris = $state({ extr: "", cont: "" });
   $effect(() => {
     const extr = uriExtracto;
     const cont = uriContable;
-    const windowDays = daysWindow;
     if (!extr || !cont) {
       summaryHead = null;
       descomposicion = null;
@@ -144,7 +144,10 @@
       }
       return;
     }
-    refreshAll();
+    if (extr !== lastUris.extr || cont !== lastUris.cont) {
+      lastUris = { extr, cont };
+      refreshAll(appliedDaysWindow);
+    }
   });
 </script>
 
@@ -159,11 +162,16 @@
           class="input input-bordered w-24"
           bind:value={daysWindow}
           title="Ventana de días para match"
-          on:input={(event:any) => setDaysWindow(event?.currentTarget?.value ?? daysWindow)}
         />
         <button
           class="btn btn-primary"
-          on:click|preventDefault={() => refreshAll()}
+          on:click|preventDefault={() => {
+            const v = normalizeDaysWindow(daysWindow);
+            daysWindow = v;
+            appliedDaysWindow = v;
+            daysWindowStore.set(v);
+            refreshAll(v);
+          }}
           disabled={loadingHead || loadingDescomp || !uriExtracto || !uriContable}
           aria-busy={loadingHead || loadingDescomp}
         >
