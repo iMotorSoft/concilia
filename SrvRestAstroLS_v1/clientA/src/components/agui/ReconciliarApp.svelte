@@ -17,7 +17,8 @@ let uploadBusy = $state(false);
 
 let formSpec: any = $state(null);
 let formValues: Record<string, any> = $state({});
-let fileObj: File | null = $state(null);
+let fileObjs: File[] = $state([]);
+let fileInputRef: HTMLInputElement | null = null;
 
 // Dos previews independientes
 let previewExtracto: any = $state(null);
@@ -55,7 +56,7 @@ function seedFormDefaults(spec: any) {
     d[f.name] = ("default" in f && f.default != null) ? f.default : "";
   }
   formValues = d;
-  fileObj = null;
+  fileObjs = [];
 }
 
 function connectSSE() {
@@ -100,6 +101,20 @@ function handle(msg: any) {
     }
     dialogOpen = false;
     showToast("info", "Vista previa lista. Revisá y confirmá.");
+    return;
+  }
+
+  if (t === "INGEST_CANONICAL_READY") {
+    const payload = msg?.payload || {};
+    const role = (payload.role || "").toLowerCase();
+    const canonical_uri = payload.canonical_uri || "";
+    if (role === "extracto" && previewExtracto) {
+      previewExtracto = { ...(previewExtracto || {}), canonical_uri };
+      showToast("info", "Canónico listo (extracto).");
+    } else if (role === "contable" && previewContable) {
+      previewContable = { ...(previewContable || {}), canonical_uri };
+      showToast("info", "Canónico listo (contable).");
+    }
     return;
   }
 
@@ -159,8 +174,12 @@ async function onSubmitUpload() {
   const fd = new FormData();
   fd.set("threadId", threadId);
   fd.set("correlationId", crypto?.randomUUID?.() ?? `corr-upload-${Date.now()}`);
-  if (!fileObj) { showToast("warning", "Seleccioná un archivo."); return; }
-  fd.set("file", fileObj, fileObj.name);
+  const selectedFiles = Array.from(fileInputRef?.files || []);
+  if (!selectedFiles.length) { showToast("warning", "Seleccioná un archivo."); return; }
+  for (const file of selectedFiles) {
+    fd.append("file", file, file.name);
+  }
+  showToast("info", `Subiendo ${selectedFiles.length} archivo(s)…`);
 
   uploadBusy = true;
   try {
@@ -233,8 +252,8 @@ async function startReconcile() {
   const currentDaysWindow = get(daysWindowStore) ?? DEFAULT_DAYS_WINDOW;
 
   fd.set("threadId", threadId);
-  fd.set("uri_extracto", previewExtracto.original_uri || "");
-  fd.set("uri_contable", previewContable.original_uri || "");
+  fd.set("uri_extracto", previewExtracto.canonical_uri || previewExtracto.original_uri || "");
+  fd.set("uri_contable", previewContable.canonical_uri || previewContable.original_uri || "");
   fd.set("days_window", String(currentDaysWindow));
 
   try {
@@ -313,8 +332,10 @@ $effect(() => {
       <input
         class="file-input file-input-bordered w-full"
         type="file"
+        multiple
         accept={formSpec?.fields?.[0]?.accept || ".xlsx,.xls,.csv"}
-        on:change={(e:any)=>{fileObj = e?.target?.files?.[0] || null;}}
+        on:change={(e:any)=>{fileObjs = Array.from(e?.target?.files || []);}}
+        bind:this={fileInputRef}
         disabled={uploadBusy}
       />
     </div>
@@ -370,10 +391,111 @@ $effect(() => {
         {/if}
       {/if}
 
+      {#if previewExtracto?.meta?.coverage}
+        {@const missingMonths = previewExtracto.meta.coverage?.missing_months || []}
+        {@const gaps = previewExtracto.meta.coverage?.gaps || []}
+        {@const partialMonths = previewExtracto.meta.coverage?.partial_months || []}
+        {@const overlap = previewExtracto.meta.coverage?.overlap || null}
+        {#if (missingMonths.length || gaps.length || partialMonths.length)}
+          <div class="alert alert-warning text-sm mt-2">
+            <div>
+              <span class="font-semibold">Cobertura incompleta.</span>
+              {#if overlap?.days_total}
+                <div class="mt-1">
+                  <span class="opacity-70">Solapamiento de fechas entre archivos:</span>
+                  <b>{overlap.days_total}</b>
+                  <span class="opacity-70">día(s)</span>
+                </div>
+              {/if}
+              {#if missingMonths.length}
+                <div class="mt-1">
+                  <span class="opacity-70">Meses faltantes:</span>
+                  <b>{missingMonths.join(", ")}</b>
+                </div>
+              {/if}
+              {#if partialMonths.length}
+                <div class="mt-1 opacity-70">Meses parciales (por días con movimientos):</div>
+                <ul class="list-disc ml-6">
+                  {#each partialMonths as pm (pm.month)}
+                    <li>
+                      {pm.month}: faltan {pm.missing_days} de {pm.total_days} días
+                      {#if Array.isArray(pm.missing_ranges) && pm.missing_ranges.length}
+                        <span class="opacity-70">
+                          (
+                          {#each pm.missing_ranges.slice(0, 4) as r, i (r.from)}
+                            {#if i > 0}; {/if}{r.from} → {r.to}
+                          {/each}
+                          {#if pm.missing_ranges.length > 4}
+                            ; +{pm.missing_ranges.length - 4} más
+                          {/if}
+                          )
+                        </span>
+                      {/if}
+                    </li>
+                  {/each}
+                </ul>
+              {/if}
+              {#if gaps.length}
+                <div class="mt-1 opacity-70">Gaps detectados (por meses):</div>
+                <ul class="list-disc ml-6">
+                  {#each gaps as g (g.from)}
+                    <li>{g.from} → {g.to} ({g.days} días)</li>
+                  {/each}
+                </ul>
+              {/if}
+            </div>
+          </div>
+        {/if}
+      {/if}
+
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm mt-1">
         <div><span class="opacity-70">Banco:</span> <b>{previewExtracto?.detected?.bank || "—"}</b></div>
         <div><span class="opacity-70">Cuenta:</span> <b>{previewExtracto?.detected?.account_full || previewExtracto?.detected?.account_core_dv || "—"}</b></div>
+        <div><span class="opacity-70">Archivos:</span> <b>{previewExtracto?.meta?.uploads_count ?? 1}</b></div>
         <div><span class="opacity-70">Rango:</span> <b>{previewExtracto?.suggest?.period_from || previewExtracto?.detected?.period_from || "—"} → {previewExtracto?.suggest?.period_to || previewExtracto?.detected?.period_to || "—"}</b></div>
+        <div class="md:col-span-2 text-xs opacity-60">
+          meta.path: {previewExtracto?.meta?.path || "—"} · meta.filename: {previewExtracto?.meta?.filename || "—"}
+        </div>
+        {#if Array.isArray(previewExtracto?.meta?.uploads) && previewExtracto.meta.uploads.length}
+          {@const uploadsSorted = [...previewExtracto.meta.uploads].sort((a:any, b:any) => {
+            const da = (a?.period_from || "").toString();
+            const db = (b?.period_from || "").toString();
+            if (da && db && da !== db) return da < db ? -1 : 1;
+            if (da && !db) return -1;
+            if (!da && db) return 1;
+            const fa = (a?.filename || "").toString();
+            const fb = (b?.filename || "").toString();
+            return fa.localeCompare(fb);
+          })}
+          {#if (previewExtracto?.meta?.uploads_count ?? previewExtracto.meta.uploads.length) > 1}
+            <div class="md:col-span-2">
+              <details class="mt-1">
+                <summary class="cursor-pointer opacity-70">Ver archivos ({previewExtracto?.meta?.uploads_count ?? previewExtracto.meta.uploads.length})</summary>
+                <ul class="list-disc ml-6 mt-1">
+                  {#each uploadsSorted as u (u.original_uri)}
+                    <li>
+                      {u.filename}
+                      {#if u.period_from || u.period_to}
+                        <span class="opacity-70">
+                          {" "}({u.period_from || "—"} a {u.period_to || "—"}{#if u.days_present != null}, días: {u.days_present}{/if})
+                        </span>
+                      {/if}
+                    </li>
+                  {/each}
+                </ul>
+              </details>
+            </div>
+          {:else}
+            {@const u0 = uploadsSorted[0]}
+            <div class="md:col-span-2">
+              <span class="opacity-70">Archivo subido:</span>
+              <b>{u0?.filename || "—"}</b>
+              <span class="opacity-70">
+                {" "}({u0?.period_from || "—"} a {u0?.period_to || "—"}{#if u0?.days_present != null}, días: {u0.days_present}{/if})
+              </span>
+            </div>
+          {/if}
+        {/if}
         <div class="md:col-span-2">
           <span class="opacity-70">Header:</span>
           <span class="whitespace-pre-wrap">{previewExtracto?.detected?.header_excerpt || "—"}</span>

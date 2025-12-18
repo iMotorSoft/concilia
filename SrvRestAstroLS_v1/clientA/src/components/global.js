@@ -9,7 +9,8 @@ export const URL = '/clientA/dist/workspace/index.html'
 const URL_REST_DEV = 'http://localhost:7058' // 'http://localhost:7018  https://judaismoenvivo.com
 const URL_REST_PRO = 'https://fce.concilia.imotorsoft.com' // 'http://localhost:7018  https://judaismoenvivo.com
 
-export const URL_REST = URL_REST_PRO
+const isLocalhost = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
+export const URL_REST = (import.meta.env.DEV || isLocalhost) ? URL_REST_DEV : URL_REST_PRO
 
 const CLOUDFLARE_SITEKEY_DEV = "0x4AAAAAAA9n8PW8yOWCn_6j"
 const CLOUDFLARE_SITEKEY_PRO = "0x4AAAAAAA9glDuv7vktGmhn"
@@ -20,5 +21,3 @@ const Paypal_Client_ID_DEV = "AfHvivsxi2MxUG2oky8TwWw-rzdjOcRZBs7RMX72XKPxiITlDF
 const Paypal_Client_ID_PRO = "AcMFsE7r4rvvDkyDIWSB8cczfWZLLb-xp3OrPHpx-Tz0LH02xEUZl-MKMDx4Z4ben_DkffQpjLQvo-S_"
 
 export const Paypal_Client_ID = Paypal_Client_ID_PRO
-
-

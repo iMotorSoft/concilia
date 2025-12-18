@@ -280,6 +280,78 @@ def _coverage_from_present_dates(
         "partial_min_missing_days": min_missing_days_to_report_partial,
     }
 
+def _merge_intervals(intervals: list[tuple[date, date]]) -> list[tuple[date, date]]:
+    if not intervals:
+        return []
+    intervals = sorted(intervals, key=lambda t: t[0])
+    merged: list[tuple[date, date]] = [intervals[0]]
+    for a, b in intervals[1:]:
+        ca, cb = merged[-1]
+        if a <= (cb + timedelta(days=1)):
+            merged[-1] = (ca, max(cb, b))
+        else:
+            merged.append((a, b))
+    return merged
+
+def _compute_overlaps_from_periods(saved: list[dict], *, max_examples: int = 6) -> dict:
+    """
+    Nivel A (UX): solapamiento por rangos detectados por archivo.
+    Devuelve días únicos de solapamiento y algunos ejemplos (pares de archivos).
+    """
+    items: list[dict] = []
+    for s in saved:
+        pf = _parse_iso_date(s.get("period_from"))
+        pt = _parse_iso_date(s.get("period_to"))
+        if not (pf and pt):
+            continue
+        if pt < pf:
+            pf, pt = pt, pf
+        items.append({"filename": s.get("filename") or "", "from": pf, "to": pt})
+
+    if len(items) < 2:
+        return {"days_total": 0, "examples": []}
+
+    intersections: list[tuple[date, date]] = []
+    examples: list[dict] = []
+    for i in range(len(items)):
+        for j in range(i + 1, len(items)):
+            a = max(items[i]["from"], items[j]["from"])
+            b = min(items[i]["to"], items[j]["to"])
+            if a <= b:
+                intersections.append((a, b))
+                if len(examples) < max_examples:
+                    examples.append({
+                        "a": items[i]["filename"],
+                        "b": items[j]["filename"],
+                        "from": a.isoformat(),
+                        "to": b.isoformat(),
+                        "days": (b - a).days + 1,
+                    })
+
+    merged = _merge_intervals(intersections)
+    days_total = sum((b - a).days + 1 for a, b in merged)
+    return {"days_total": days_total, "examples": examples}
+
+def _compute_overlaps_from_present_dates(saved: list[dict], *, max_example_dates: int = 5) -> dict:
+    """
+    Solapamiento por fechas con movimientos (más preciso que por rangos):
+    cuenta cuántas fechas (días) aparecen en 2+ archivos.
+    """
+    date_counts: dict[date, int] = {}
+    for s in saved:
+        dates = s.get("_present_dates")
+        if not isinstance(dates, set):
+            continue
+        for d in dates:
+            if isinstance(d, date):
+                date_counts[d] = date_counts.get(d, 0) + 1
+
+    overlap_dates = sorted([d for d, c in date_counts.items() if c >= 2])
+    return {
+        "days_total": len(overlap_dates),
+        "example_dates": [d.isoformat() for d in overlap_dates[:max_example_dates]],
+    }
+
 def _compute_coverage(saved: list[dict]) -> dict:
     """
     Construye warning de cobertura usando period_from/to detectados por upload.
@@ -541,7 +613,9 @@ async def _handle_upload(request: Any, role_required: Optional[str] = None, path
                 days_present = None
                 try:
                     if Path(dst).suffix.lower() in {".xlsx", ".xlsm", ".xltx", ".xltm"}:
-                        days_present = len(_extract_present_dates_from_xlsx(Path(dst))) or None
+                        present_dates = _extract_present_dates_from_xlsx(Path(dst))
+                        days_present = len(present_dates) or None
+                        saved_item["_present_dates"] = present_dates
                 except Exception:
                     days_present = None
                 saved_item.update({
@@ -559,6 +633,11 @@ async def _handle_upload(request: Any, role_required: Optional[str] = None, path
         coverage = {"missing_months": [], "gaps": [], "partial_months": []}
         if role == "extracto" and len(saved) > 1:
             coverage = _compute_coverage(saved)
+            overlap = _compute_overlaps_from_present_dates(saved)
+            if not overlap.get("days_total"):
+                overlap = _compute_overlaps_from_periods(saved)
+            if overlap.get("days_total"):
+                coverage["overlap"] = overlap
 
         # Si son varios extractos, consolidamos a un XLSX único para mantener el resto del pipeline intacto.
         if role == "extracto" and len(saved) > 1:
