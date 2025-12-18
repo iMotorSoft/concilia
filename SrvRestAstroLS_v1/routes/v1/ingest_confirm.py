@@ -8,10 +8,97 @@ from litestar import post
 from litestar.response import Response
 
 from .agui_notify import emit
+import globalVar as Var
+
+from pathlib import Path
+from urllib.parse import urlparse
+from uuid import uuid4
+import asyncio
+import re
 
 # Estado en memoria por threadId
 # _CONFIRMS[threadId] = {"extracto": {...} | None, "contable": {...} | None}
 _CONFIRMS: Dict[str, Dict[str, Optional[dict]]] = {}
+
+_SAFE_NAME_RX = re.compile(r"[^A-Za-z0-9._-]+")
+
+def _safe_filename(name: str) -> str:
+    base = Path(name or "canonical.parquet").name
+    base = _SAFE_NAME_RX.sub("_", base).strip("._") or "canonical.parquet"
+    return base
+
+def _from_file_uri(uri: str) -> Path:
+    if uri and uri.startswith("file://"):
+        return Path(urlparse(uri).path)
+    return Path(uri)
+
+def _build_canonical_parquet(role: str, original_uri: str, *, bank: str | None, period_from: str | None, period_to: str | None) -> str:
+    """
+    Genera un parquet canónico (estandarizado) a partir del archivo original (xlsx/csv o ya parquet).
+    Retorna canonical_uri (file://...).
+    """
+    if not original_uri:
+        raise ValueError("original_uri vacío")
+
+    # Si ya es parquet, lo aceptamos como canónico.
+    if str(original_uri).lower().endswith((".parquet", ".pq")):
+        return original_uri
+
+    from routes.v1.reconcile_start import _load_extracto, _load_pilaga  # import local para evitar ciclos globales
+
+    src_path = _from_file_uri(original_uri)
+    if role == "extracto":
+        df = _load_extracto(src_path)
+        prefix = "extracto"
+    else:
+        df = _load_pilaga(src_path)
+        prefix = "contable"
+
+    tag_pf = (period_from or "").replace("-", "")[:8] or "na"
+    tag_pt = (period_to or "").replace("-", "")[:8] or "na"
+    tag_bank = (bank or "bank").lower()
+    fname = _safe_filename(f"{uuid4()}_{prefix}_{tag_bank}_{tag_pf}_{tag_pt}.parquet")
+
+    canonical_uri = Var.resolve_storage_uri("canonical", filename=fname)
+    if not canonical_uri.startswith("file://"):
+        raise RuntimeError("Storage provider no soportado (solo local).")
+    out_path = Path(urlparse(canonical_uri).path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        import polars as pl  # type: ignore
+        pl.from_pandas(df).write_parquet(out_path)
+    except Exception:
+        # fallback: pandas (requiere engine instalado)
+        df.to_parquet(out_path)
+
+    return canonical_uri
+
+async def _canonicalize_async(thread_id: str, role: str, original_uri: str, bank: str | None, period_from: str | None, period_to: str | None) -> None:
+    try:
+        canonical_uri = await asyncio.to_thread(
+            _build_canonical_parquet,
+            role,
+            original_uri,
+            bank=bank,
+            period_from=period_from,
+            period_to=period_to,
+        )
+
+        state = _CONFIRMS.setdefault(thread_id, {"extracto": None, "contable": None})
+        if state.get(role) is None:
+            state[role] = {}
+        state[role]["canonical_uri"] = canonical_uri
+
+        await emit(thread_id, {
+            "type": "INGEST_CANONICAL_READY",
+            "payload": {"role": role, "canonical_uri": canonical_uri},
+        })
+    except Exception as e:
+        await emit(thread_id, {
+            "type": "TOAST", "level": "warning",
+            "message": f"No se pudo generar canónico ({role}): {type(e).__name__}: {e}",
+        })
 
 def _iso_date_min(a: Optional[str], b: Optional[str]) -> Optional[str]:
     if not a:
@@ -63,6 +150,9 @@ async def ingest_confirm(request: Any) -> Response:
         "confirmed": True,
     }
 
+    # Generar canónico en background (Parquet) para acelerar reconcile
+    asyncio.create_task(_canonicalize_async(threadId, role, original_uri, bank, period_from, period_to))
+
     # Feedback inmediato
     await emit(threadId, {
         "type": "TOAST", "level": "success",
@@ -97,4 +187,3 @@ async def ingest_confirm(request: Any) -> Response:
 # Exponer estado para otros endpoints (reconcile_start)
 def get_confirms(thread_id: str) -> Dict[str, Optional[dict]]:
     return _CONFIRMS.get(thread_id, {"extracto": None, "contable": None})
-

@@ -21,6 +21,10 @@ from openpyxl import load_workbook
 from .agui_notify import emit
 from urllib.parse import urlparse
 
+try:
+    import polars as pl  # type: ignore
+except Exception:  # pragma: no cover
+    pl = None
 
 # =========================
 # Helpers (IO) + cache
@@ -132,6 +136,16 @@ def _load_pilaga(path: Path) -> pd.DataFrame:
     cache_key = _df_cache_key("pilaga", path)
     if cache_key in _DF_CACHE:
         return _DF_CACHE[cache_key].copy()
+
+    if path.suffix.lower() in {".parquet", ".pq"}:
+        if pl is not None:
+            df = pl.read_parquet(str(path)).to_pandas()
+        else:
+            df = pd.read_parquet(str(path))
+        if "fecha" in df.columns:
+            df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce")
+        _DF_CACHE[cache_key] = df.copy()
+        return df
 
     engine = _preferred_engine()
     try:
@@ -315,6 +329,20 @@ def _load_extracto(path: Path) -> pd.DataFrame:
     cache_key = _df_cache_key("extracto", path)
     if cache_key in _DF_CACHE:
         return _DF_CACHE[cache_key].copy()
+
+    if path.suffix.lower() in {".parquet", ".pq"}:
+        if pl is not None:
+            out = pl.read_parquet(str(path)).to_pandas()
+        else:
+            out = pd.read_parquet(str(path))
+        if "fecha" in out.columns:
+            out["fecha"] = pd.to_datetime(out["fecha"], errors="coerce")
+        if "monto" in out.columns:
+            out["monto"] = pd.to_numeric(out["monto"], errors="coerce").fillna(0.0)
+        if "documento" in out.columns:
+            out["documento"] = out["documento"].astype(str)
+        _DF_CACHE[cache_key] = out.copy()
+        return out
 
     engine = _preferred_engine()
     try:
