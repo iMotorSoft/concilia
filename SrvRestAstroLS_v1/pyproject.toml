@@ -29,6 +29,7 @@ dependencies = [
     "aiofiles>=23.2.1",
     "python-multipart>=0.0.20",
     "polars>=1.35.2",
+    "duckdb>=1.4.3",
 ]
 
 [tool.hatch.metadata]
