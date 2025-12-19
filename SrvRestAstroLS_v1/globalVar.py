@@ -57,6 +57,20 @@ ENABLE_PG_TRGM: bool = True
 ENABLE_PG_VECTOR: bool = True
 
 # =========================
+# Multitenancy (defaults por proyecto)
+# =========================
+TENANT_SLUG: str = os.environ.get("CONCIAI_TENANT_SLUG", "fce")
+TENANT_NAME: str = os.environ.get("CONCIAI_TENANT_NAME", "FCE")
+PROJECT_NAME: str = os.environ.get("CONCIAI_PROJECT_NAME", "concilia")
+AUTO_BOOTSTRAP_TENANCY: bool = os.environ.get("CONCIAI_AUTO_BOOTSTRAP", "true").lower() == "true"
+
+# =========================
+# Telemetria (MVP)
+# =========================
+ENABLE_TELEMETRY: bool = os.environ.get("CONCIAI_TELEMETRY", "true").lower() == "true"
+TELEMETRY_BASIC_ONLY: bool = os.environ.get("CONCIAI_TELEMETRY_BASIC", "true").lower() == "true"
+
+# =========================
 # Seguridad / Roles
 # =========================
 JWT_SECRET: str = os.environ.get("CONCIAI_JWT_SECRET", "change_me_dev_only")

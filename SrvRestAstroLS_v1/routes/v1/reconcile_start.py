@@ -7,6 +7,7 @@ import asyncio
 import math
 import os
 import re
+import time
 import traceback
 from datetime import timedelta
 from pathlib import Path
@@ -19,6 +20,8 @@ import pandas as pd
 from openpyxl import load_workbook
 
 from .agui_notify import emit
+from globalVar import ENABLE_TELEMETRY, TELEMETRY_BASIC_ONLY
+from services.db_pg import connect_db, ensure_tenant_project, insert_event, insert_run, update_run
 from urllib.parse import urlparse
 
 try:
@@ -455,6 +458,17 @@ def _match_one_to_one_by_amount_and_date_window(
 # =========================
 # API Route
 # =========================
+_RECONCILE_STAGES = [
+    {"name": "PREPARE_INPUTS", "label": "Preparando entradas", "weight": 2},
+    {"name": "LOAD_EXTRACTO", "label": "Cargando extracto", "weight": 18},
+    {"name": "LOAD_CONTABLE", "label": "Cargando contable", "weight": 18},
+    {"name": "NORMALIZE", "label": "Normalizando", "weight": 8},
+    {"name": "MATCH_1_1", "label": "Conciliando 1→1", "weight": 16},
+    {"name": "SUMMARY", "label": "Resumen", "weight": 10},
+    {"name": "FINALIZE", "label": "Finalizando", "weight": 2},
+]
+
+
 @post("/api/reconcile/start")
 async def reconcile_start(request: Any) -> Response:
     """
@@ -468,6 +482,52 @@ async def reconcile_start(request: Any) -> Response:
       - {type:"RUN_START", ...}
       - {type:"RESULTS_READY", payload:{summary, counts}}
     """
+    conn = None
+    run_id = None
+    tenant_id = None
+    project_id = None
+    stage_started: dict[str, float] = {}
+    include_metrics = not TELEMETRY_BASIC_ONLY
+    thread_id = None
+
+    async def _emit_event(payload: dict[str, Any]) -> None:
+        if thread_id:
+            await emit(thread_id, payload)
+
+    async def _emit_stage(
+        stage: str,
+        status: str,
+        message: Optional[str] = None,
+        timing_ms: Optional[int] = None,
+        metrics: Optional[dict[str, Any]] = None,
+    ) -> None:
+        if conn and run_id and status == "start":
+            await update_run(conn, run_id=run_id, current_stage=stage, status="running")
+        payload = {
+            "type": "RECONCILE_STAGE",
+            "payload": {
+                "run_id": run_id,
+                "stage": stage,
+                "status": status,
+                "message": message,
+                "timing_ms": timing_ms,
+                "metrics": metrics if include_metrics else None,
+            },
+        }
+        await _emit_event(payload)
+        if conn and run_id and tenant_id and project_id:
+            await insert_event(
+                conn,
+                run_id=run_id,
+                tenant_id=tenant_id,
+                project_id=project_id,
+                stage=stage,
+                status=status,
+                message=message,
+                timing_ms=timing_ms,
+                metrics=metrics if include_metrics else None,
+            )
+
     try:
         form = await request.form()
         thread_id = form.get("threadId")
@@ -480,20 +540,89 @@ async def reconcile_start(request: Any) -> Response:
         if not uri_extracto or not uri_contable:
             return Response({"ok": False, "message": "Faltan URIs: uri_extracto y uri_contable son obligatorios."}, status_code=400)
 
-        if thread_id:
-            asyncio.create_task(emit(thread_id, {"type": "RUN_START", "payload": {"days_window": days_window}}))
+        if ENABLE_TELEMETRY:
+            conn = await connect_db()
+            tenant_id, project_id = await ensure_tenant_project(conn)
+            run_id = await insert_run(
+                conn,
+                tenant_id=tenant_id,
+                project_id=project_id,
+                status="running",
+                current_stage="PREPARE_INPUTS",
+                days_window=days_window,
+                extracto_uri=uri_extracto,
+                contable_uri=uri_contable,
+                payload={"thread_id": thread_id} if thread_id else {},
+            )
+
+        await _emit_event({
+            "type": "RUN_START",
+            "payload": {
+                "run_id": run_id,
+                "days_window": days_window,
+                "stages": _RECONCILE_STAGES,
+            },
+        })
 
         path_extracto = _from_file_uri(uri_extracto)
         path_contable = _from_file_uri(uri_contable)
 
         # 1) Cargar
+        await _emit_stage("PREPARE_INPUTS", "start", "Validando entradas…")
+        stage_started["PREPARE_INPUTS"] = time.monotonic()
+        await _emit_stage(
+            "PREPARE_INPUTS",
+            "done",
+            "Entradas listas.",
+            timing_ms=int((time.monotonic() - stage_started["PREPARE_INPUTS"]) * 1000),
+        )
+
+        await _emit_stage("LOAD_CONTABLE", "start", "Cargando contable…")
+        stage_started["LOAD_CONTABLE"] = time.monotonic()
         df_pilaga = _load_pilaga(path_contable)
-        df_banco  = _load_extracto(path_extracto)
+        await _emit_stage(
+            "LOAD_CONTABLE",
+            "done",
+            "Contable cargado.",
+            timing_ms=int((time.monotonic() - stage_started["LOAD_CONTABLE"]) * 1000),
+            metrics={"rows": len(df_pilaga)} if include_metrics else None,
+        )
+
+        await _emit_stage("LOAD_EXTRACTO", "start", "Cargando extracto…")
+        stage_started["LOAD_EXTRACTO"] = time.monotonic()
+        df_banco = _load_extracto(path_extracto)
+        await _emit_stage(
+            "LOAD_EXTRACTO",
+            "done",
+            "Extracto cargado.",
+            timing_ms=int((time.monotonic() - stage_started["LOAD_EXTRACTO"]) * 1000),
+            metrics={"rows": len(df_banco)} if include_metrics else None,
+        )
+
+        await _emit_stage("NORMALIZE", "start", "Normalizando datos…")
+        stage_started["NORMALIZE"] = time.monotonic()
+        await _emit_stage(
+            "NORMALIZE",
+            "done",
+            "Normalizacion completa.",
+            timing_ms=int((time.monotonic() - stage_started["NORMALIZE"]) * 1000),
+        )
 
         # 2) Conciliar
+        await _emit_stage("MATCH_1_1", "start", "Conciliando 1→1…")
+        stage_started["MATCH_1_1"] = time.monotonic()
         pairs, sobrantes_p, sobrantes_b = _match_one_to_one_by_amount_and_date_window(df_pilaga, df_banco, days_window)
+        await _emit_stage(
+            "MATCH_1_1",
+            "done",
+            "Conciliacion 1→1 completa.",
+            timing_ms=int((time.monotonic() - stage_started["MATCH_1_1"]) * 1000),
+            metrics={"pairs": len(pairs)} if include_metrics else None,
+        )
 
         # 3) Resumen
+        await _emit_stage("SUMMARY", "start", "Armando resumen…")
+        stage_started["SUMMARY"] = time.monotonic()
         total_p = len(df_pilaga)
         total_b = len(df_banco)
         conc_pairs = len(pairs)
@@ -509,16 +638,32 @@ async def reconcile_start(request: Any) -> Response:
             "days_window": days_window,
         }
 
-        if thread_id:
-            asyncio.create_task(emit(thread_id, {
-                "type": "RESULTS_READY",
-                "payload": {
-                    "summary": summary,
-                    # si querés, podés agregar muestras (primeros N) para UI:
-                    # "sample_no_en_banco": sobrantes_p.head(10).to_dict(orient="records"),
-                    # "sample_no_en_pilaga": sobrantes_b.head(10).to_dict(orient="records"),
-                }
-            }))
+        await _emit_stage(
+            "SUMMARY",
+            "done",
+            "Resumen listo.",
+            timing_ms=int((time.monotonic() - stage_started["SUMMARY"]) * 1000),
+            metrics={"banco": total_b, "contable": total_p} if include_metrics else None,
+        )
+
+        await _emit_stage("FINALIZE", "start", "Finalizando…")
+        stage_started["FINALIZE"] = time.monotonic()
+        if conn and run_id:
+            await update_run(conn, run_id=run_id, status="done", finished=True)
+        await _emit_stage(
+            "FINALIZE",
+            "done",
+            "Finalizacion completa.",
+            timing_ms=int((time.monotonic() - stage_started["FINALIZE"]) * 1000),
+        )
+
+        await _emit_event({
+            "type": "RESULTS_READY",
+            "payload": {
+                "run_id": run_id,
+                "summary": summary,
+            },
+        })
 
         return Response({"ok": True, "summary": summary}, status_code=200)
 
@@ -526,14 +671,22 @@ async def reconcile_start(request: Any) -> Response:
         tb = traceback.format_exc(limit=12)
         print("[reconcile_start] ERROR:", type(e).__name__, str(e), flush=True)
         print(tb, flush=True)
-        try:
-            form = await request.form()
-            thread_id = form.get("threadId")
-            if thread_id:
-                asyncio.create_task(emit(thread_id, {
-                    "type": "TOAST", "level": "error",
-                    "message": f"Reconcile error: {type(e).__name__}: {e}"
-                }))
-        except Exception:
-            pass
+        if conn and run_id:
+            await update_run(
+                conn,
+                run_id=run_id,
+                status="error",
+                error_code=type(e).__name__,
+                error_message=str(e),
+                finished=True,
+            )
+        if thread_id:
+            await _emit_event({
+                "type": "TOAST",
+                "level": "error",
+                "message": f"Reconcile error: {type(e).__name__}: {e}",
+            })
         return Response({"ok": False, "message": "Error interno en conciliación", "error": f"{type(e).__name__}: {e}", "trace": tb}, status_code=500)
+    finally:
+        if conn:
+            await conn.close()
