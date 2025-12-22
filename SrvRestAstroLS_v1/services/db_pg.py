@@ -2,15 +2,10 @@
 from __future__ import annotations
 
 import asyncpg
-from typing import Any, Optional, Tuple
+import json
+from typing import Any, Optional
 
-from globalVar import (
-    AUTO_BOOTSTRAP_TENANCY,
-    DB_URL,
-    PROJECT_NAME,
-    TENANT_NAME,
-    TENANT_SLUG,
-)
+from globalVar import DB_SCHEMA, DB_URL
 
 
 def _normalize_db_url(url: str) -> str:
@@ -22,159 +17,80 @@ def _normalize_db_url(url: str) -> str:
 
 
 async def connect_db() -> asyncpg.Connection:
-    return await asyncpg.connect(_normalize_db_url(DB_URL))
-
-
-async def ensure_tenant_project(conn: asyncpg.Connection) -> Tuple[str, str]:
-    tenant_id = await conn.fetchval(
-        "SELECT id FROM concilia_tenants WHERE slug = $1",
-        TENANT_SLUG,
+    return await asyncpg.connect(
+        _normalize_db_url(DB_URL),
+        server_settings={"search_path": DB_SCHEMA},
     )
-    if not tenant_id:
-        if not AUTO_BOOTSTRAP_TENANCY:
-            raise RuntimeError("Tenant no existe y AUTO_BOOTSTRAP_TENANCY=false")
-        tenant_id = await conn.fetchval(
-            """
-            INSERT INTO concilia_tenants (slug, name)
-            VALUES ($1, $2)
-            RETURNING id
-            """,
-            TENANT_SLUG,
-            TENANT_NAME,
-        )
 
-    project_id = await conn.fetchval(
-        "SELECT id FROM concilia_projects WHERE tenant_id = $1 AND name = $2",
-        tenant_id,
-        PROJECT_NAME,
+
+async def get_workspace_by_slug(conn: asyncpg.Connection, slug: str) -> str:
+    workspace_id = await conn.fetchval(
+        "SELECT workspace_id FROM core_workspaces WHERE slug = $1",
+        slug,
     )
-    if not project_id:
-        if not AUTO_BOOTSTRAP_TENANCY:
-            raise RuntimeError("Project no existe y AUTO_BOOTSTRAP_TENANCY=false")
-        project_id = await conn.fetchval(
-            """
-            INSERT INTO concilia_projects (tenant_id, name)
-            VALUES ($1, $2)
-            RETURNING id
-            """,
-            tenant_id,
-            PROJECT_NAME,
-        )
-
-    return str(tenant_id), str(project_id)
+    if not workspace_id:
+        raise ValueError(f"Workspace no existe: {slug}")
+    return str(workspace_id)
 
 
-async def insert_run(
+async def create_run(
     conn: asyncpg.Connection,
     *,
-    tenant_id: str,
-    project_id: str,
-    status: str,
-    current_stage: Optional[str],
-    days_window: int,
-    extracto_uri: str,
-    contable_uri: str,
-    payload: Optional[dict[str, Any]] = None,
+    workspace_id: str,
+    kind: str,
+    status: str = "running",
+    params: Optional[dict[str, Any]] = None,
 ) -> str:
+    params_json = json.dumps(params or {})
     return await conn.fetchval(
         """
-        INSERT INTO concilia_runs (
-            tenant_id, project_id, status, current_stage, days_window,
-            extracto_uri, contable_uri, payload, started_at
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
-        RETURNING id
+        INSERT INTO core_runs (workspace_id, kind, status, params, started_at)
+        VALUES ($1, $2, $3, $4::jsonb, now())
+        RETURNING run_id
         """,
-        tenant_id,
-        project_id,
+        workspace_id,
+        kind,
         status,
-        current_stage,
-        days_window,
-        extracto_uri,
-        contable_uri,
-        payload or {},
+        params_json,
     )
 
 
-async def update_run(
+async def append_event(
     conn: asyncpg.Connection,
     *,
+    workspace_id: str,
     run_id: str,
-    status: Optional[str] = None,
-    current_stage: Optional[str] = None,
-    error_code: Optional[str] = None,
-    error_message: Optional[str] = None,
-    finished: bool = False,
+    type: str,
+    payload: Optional[dict[str, Any]] = None,
 ) -> None:
-    fields = []
-    values = []
-    idx = 1
-
-    if status is not None:
-        fields.append(f"status = ${idx}")
-        values.append(status)
-        idx += 1
-    if current_stage is not None:
-        fields.append(f"current_stage = ${idx}")
-        values.append(current_stage)
-        idx += 1
-    if error_code is not None:
-        fields.append(f"error_code = ${idx}")
-        values.append(error_code)
-        idx += 1
-    if error_message is not None:
-        fields.append(f"error_message = ${idx}")
-        values.append(error_message)
-        idx += 1
-    if finished:
-        fields.append("finished_at = now()")
-
-    if not fields:
-        return
-
-    values.append(run_id)
-    set_clause = ", ".join(fields)
+    payload_json = json.dumps(payload or {})
     await conn.execute(
-        f"UPDATE concilia_runs SET {set_clause} WHERE id = ${idx}",
-        *values,
+        """
+        INSERT INTO core_events (workspace_id, run_id, type, payload)
+        VALUES ($1, $2, $3, $4::jsonb)
+        """,
+        workspace_id,
+        run_id,
+        type,
+        payload_json,
     )
 
 
-async def insert_event(
+async def close_run(
     conn: asyncpg.Connection,
     *,
+    workspace_id: str,
     run_id: str,
-    tenant_id: str,
-    project_id: str,
-    stage: str,
     status: str,
-    message: Optional[str] = None,
-    progress_current: Optional[int] = None,
-    progress_total: Optional[int] = None,
-    progress_pct: Optional[float] = None,
-    timing_ms: Optional[int] = None,
-    metrics: Optional[dict[str, Any]] = None,
-    meta: Optional[dict[str, Any]] = None,
 ) -> None:
     await conn.execute(
         """
-        INSERT INTO concilia_events (
-            run_id, tenant_id, project_id, stage, status, message,
-            progress_current, progress_total, progress_pct, timing_ms,
-            metrics, meta
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        UPDATE core_runs
+        SET status = $1,
+            ended_at = now()
+        WHERE workspace_id = $2 AND run_id = $3
         """,
-        run_id,
-        tenant_id,
-        project_id,
-        stage,
         status,
-        message,
-        progress_current,
-        progress_total,
-        progress_pct,
-        timing_ms,
-        metrics,
-        meta or {},
+        workspace_id,
+        run_id,
     )

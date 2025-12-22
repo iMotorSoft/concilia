@@ -80,6 +80,10 @@ else:
     )
 
 app = Litestar(route_handlers=route_handlers, cors_config=cors_config)
+try:
+    Var.boot_log()
+except Exception:
+    pass
 
 if __name__ == "__main__":
     try:

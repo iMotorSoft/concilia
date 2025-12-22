@@ -1,4 +1,6 @@
 BSD
+nano ~/.bashrc
+source ~/.bashrc
 source .venv/bin/activate
 
 ******* Grupos

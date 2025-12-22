@@ -4,8 +4,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
-import os
 import re
 import time
 import traceback
@@ -20,14 +20,22 @@ import pandas as pd
 from openpyxl import load_workbook
 
 from .agui_notify import emit
-from globalVar import ENABLE_TELEMETRY, TELEMETRY_BASIC_ONLY
-from services.db_pg import connect_db, ensure_tenant_project, insert_event, insert_run, update_run
+from globalVar import AUTO_BOOTSTRAP_TENANCY, WORKSPACE_SLUG
+from services.db_pg import (
+    append_event as core_append_event,
+    close_run as core_close_run,
+    connect_db as core_connect_db,
+    create_run as core_create_run,
+    get_workspace_by_slug,
+)
 from urllib.parse import urlparse
 
 try:
     import polars as pl  # type: ignore
 except Exception:  # pragma: no cover
     pl = None
+
+logger = logging.getLogger(__name__)
 
 # =========================
 # Helpers (IO) + cache
@@ -482,13 +490,81 @@ async def reconcile_start(request: Any) -> Response:
       - {type:"RUN_START", ...}
       - {type:"RESULTS_READY", payload:{summary, counts}}
     """
-    conn = None
+    core_conn = None
+    core_run_id = None
+    workspace_id = None
+    workspace_slug = WORKSPACE_SLUG
     run_id = None
-    tenant_id = None
-    project_id = None
     stage_started: dict[str, float] = {}
-    include_metrics = not TELEMETRY_BASIC_ONLY
     thread_id = None
+
+    async def _bootstrap_workspace(conn: Any, slug: str) -> str:
+        if "-" in slug:
+            client_slug, product_slug = slug.split("-", 1)
+        else:
+            client_slug = slug
+            product_slug = slug
+
+        client_id = await conn.fetchval(
+            "SELECT client_id FROM core_clients WHERE slug = $1",
+            client_slug,
+        )
+        if not client_id:
+            client_id = await conn.fetchval(
+                """
+                INSERT INTO core_clients (slug, name)
+                VALUES ($1, $2)
+                ON CONFLICT (slug) DO UPDATE
+                  SET name = EXCLUDED.name
+                RETURNING client_id
+                """,
+                client_slug,
+                client_slug,
+            )
+        if not client_id:
+            raise RuntimeError(f"Bootstrap failed for core_clients slug={client_slug}")
+
+        product_id = await conn.fetchval(
+            "SELECT product_id FROM core_products WHERE slug = $1",
+            product_slug,
+        )
+        if not product_id:
+            product_id = await conn.fetchval(
+                """
+                INSERT INTO core_products (slug, name)
+                VALUES ($1, $2)
+                ON CONFLICT (slug) DO UPDATE
+                  SET name = EXCLUDED.name
+                RETURNING product_id
+                """,
+                product_slug,
+                product_slug,
+            )
+        if not product_id:
+            raise RuntimeError(f"Bootstrap failed for core_products slug={product_slug}")
+
+        workspace_id = await conn.fetchval(
+            "SELECT workspace_id FROM core_workspaces WHERE slug = $1",
+            slug,
+        )
+        if not workspace_id:
+            workspace_id = await conn.fetchval(
+                """
+                INSERT INTO core_workspaces (slug, name, client_id, product_id)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (slug) DO UPDATE
+                  SET name = EXCLUDED.name
+                RETURNING workspace_id
+                """,
+                slug,
+                slug,
+                client_id,
+                product_id,
+            )
+        if not workspace_id:
+            raise RuntimeError(f"Bootstrap failed for core_workspaces slug={slug}")
+
+        return str(workspace_id)
 
     async def _emit_event(payload: dict[str, Any]) -> None:
         if thread_id:
@@ -501,8 +577,6 @@ async def reconcile_start(request: Any) -> Response:
         timing_ms: Optional[int] = None,
         metrics: Optional[dict[str, Any]] = None,
     ) -> None:
-        if conn and run_id and status == "start":
-            await update_run(conn, run_id=run_id, current_stage=stage, status="running")
         payload = {
             "type": "RECONCILE_STAGE",
             "payload": {
@@ -511,21 +585,23 @@ async def reconcile_start(request: Any) -> Response:
                 "status": status,
                 "message": message,
                 "timing_ms": timing_ms,
-                "metrics": metrics if include_metrics else None,
+                "metrics": metrics,
             },
         }
         await _emit_event(payload)
-        if conn and run_id and tenant_id and project_id:
-            await insert_event(
-                conn,
-                run_id=run_id,
-                tenant_id=tenant_id,
-                project_id=project_id,
-                stage=stage,
-                status=status,
-                message=message,
-                timing_ms=timing_ms,
-                metrics=metrics if include_metrics else None,
+        if core_conn and core_run_id and workspace_id:
+            await core_append_event(
+                core_conn,
+                workspace_id=workspace_id,
+                run_id=core_run_id,
+                type="STAGE",
+                payload={
+                    "stage": stage,
+                    "status": status,
+                    "message": message,
+                    "timing_ms": timing_ms,
+                    "metrics": metrics,
+                },
             )
 
     try:
@@ -540,20 +616,30 @@ async def reconcile_start(request: Any) -> Response:
         if not uri_extracto or not uri_contable:
             return Response({"ok": False, "message": "Faltan URIs: uri_extracto y uri_contable son obligatorios."}, status_code=400)
 
-        if ENABLE_TELEMETRY:
-            conn = await connect_db()
-            tenant_id, project_id = await ensure_tenant_project(conn)
-            run_id = await insert_run(
-                conn,
-                tenant_id=tenant_id,
-                project_id=project_id,
-                status="running",
-                current_stage="PREPARE_INPUTS",
-                days_window=days_window,
-                extracto_uri=uri_extracto,
-                contable_uri=uri_contable,
-                payload={"thread_id": thread_id} if thread_id else {},
-            )
+        # Core-only run initialization
+        core_conn = await core_connect_db()
+        try:
+            workspace_id = await get_workspace_by_slug(core_conn, workspace_slug)
+        except ValueError:
+            if AUTO_BOOTSTRAP_TENANCY:
+                workspace_id = await _bootstrap_workspace(core_conn, workspace_slug)
+            else:
+                return Response(
+                    {"ok": False, "message": f"Workspace no existe: {workspace_slug}"},
+                    status_code=400,
+                )
+        core_run_id = await core_create_run(
+            core_conn,
+            workspace_id=workspace_id,
+            kind="concilia_reconcile",
+            params={
+                "thread_id": thread_id,
+                "uri_extracto": uri_extracto,
+                "uri_contable": uri_contable,
+                "days_window": days_window,
+            },
+        )
+        run_id = core_run_id
 
         await _emit_event({
             "type": "RUN_START",
@@ -585,7 +671,7 @@ async def reconcile_start(request: Any) -> Response:
             "done",
             "Contable cargado.",
             timing_ms=int((time.monotonic() - stage_started["LOAD_CONTABLE"]) * 1000),
-            metrics={"rows": len(df_pilaga)} if include_metrics else None,
+            metrics={"rows": len(df_pilaga)},
         )
 
         await _emit_stage("LOAD_EXTRACTO", "start", "Cargando extracto…")
@@ -596,7 +682,7 @@ async def reconcile_start(request: Any) -> Response:
             "done",
             "Extracto cargado.",
             timing_ms=int((time.monotonic() - stage_started["LOAD_EXTRACTO"]) * 1000),
-            metrics={"rows": len(df_banco)} if include_metrics else None,
+            metrics={"rows": len(df_banco)},
         )
 
         await _emit_stage("NORMALIZE", "start", "Normalizando datos…")
@@ -617,7 +703,7 @@ async def reconcile_start(request: Any) -> Response:
             "done",
             "Conciliacion 1→1 completa.",
             timing_ms=int((time.monotonic() - stage_started["MATCH_1_1"]) * 1000),
-            metrics={"pairs": len(pairs)} if include_metrics else None,
+            metrics={"pairs": len(pairs)},
         )
 
         # 3) Resumen
@@ -643,13 +729,21 @@ async def reconcile_start(request: Any) -> Response:
             "done",
             "Resumen listo.",
             timing_ms=int((time.monotonic() - stage_started["SUMMARY"]) * 1000),
-            metrics={"banco": total_b, "contable": total_p} if include_metrics else None,
+            metrics={"banco": total_b, "contable": total_p},
         )
 
         await _emit_stage("FINALIZE", "start", "Finalizando…")
         stage_started["FINALIZE"] = time.monotonic()
-        if conn and run_id:
-            await update_run(conn, run_id=run_id, status="done", finished=True)
+        if core_conn and core_run_id and workspace_id:
+            try:
+                await core_close_run(
+                    core_conn,
+                    workspace_id=workspace_id,
+                    run_id=core_run_id,
+                    status="done",
+                )
+            except Exception as e:
+                print(f"[reconcile_start][core] close_run error: {type(e).__name__}: {e}", flush=True)
         await _emit_stage(
             "FINALIZE",
             "done",
@@ -669,24 +763,46 @@ async def reconcile_start(request: Any) -> Response:
 
     except Exception as e:
         tb = traceback.format_exc(limit=12)
+        logger.exception("reconcile_start error")
         print("[reconcile_start] ERROR:", type(e).__name__, str(e), flush=True)
         print(tb, flush=True)
-        if conn and run_id:
-            await update_run(
-                conn,
-                run_id=run_id,
-                status="error",
-                error_code=type(e).__name__,
-                error_message=str(e),
-                finished=True,
-            )
+        if core_conn and core_run_id and workspace_id:
+            try:
+                await _emit_stage(
+                    "FINALIZE",
+                    "error",
+                    f"{type(e).__name__}: {e}",
+                )
+            except Exception as stage_err:
+                print(
+                    f"[reconcile_start][core] error stage failed: {type(stage_err).__name__}: {stage_err}",
+                    flush=True,
+                )
+            try:
+                await core_close_run(
+                    core_conn,
+                    workspace_id=workspace_id,
+                    run_id=core_run_id,
+                    status="error",
+                )
+            except Exception as close_err:
+                print(f"[reconcile_start][core] close_run error: {type(close_err).__name__}: {close_err}", flush=True)
         if thread_id:
             await _emit_event({
                 "type": "TOAST",
                 "level": "error",
                 "message": f"Reconcile error: {type(e).__name__}: {e}",
             })
-        return Response({"ok": False, "message": "Error interno en conciliación", "error": f"{type(e).__name__}: {e}", "trace": tb}, status_code=500)
+        return Response(
+            {
+                "ok": False,
+                "message": "Error interno en conciliación",
+                "error": f"{type(e).__name__}: {e}",
+                "trace": tb,
+                "where": "reconcile_start",
+            },
+            status_code=500,
+        )
     finally:
-        if conn:
-            await conn.close()
+        if core_conn:
+            await core_conn.close()
