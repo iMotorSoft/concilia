@@ -561,8 +561,11 @@ async function startWizard() {
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const j = await res.json();
-    if (j?.status && j.status !== "ok") {
+    if (j?.status && !["ok", "started"].includes(j.status)) {
       throw new Error(`status ${j.status}`);
+    }
+    if (j?.ok === false) {
+      throw new Error(j?.message || "respuesta inválida");
     }
     wizardRunId = j?.run_id || null;
     wizardThreadId = j?.thread_id || null;
