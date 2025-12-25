@@ -50,6 +50,7 @@ let wizardConfirm: any = $state(null);
 let wizardScopeMode = $state("ALL");
 let wizardWindowFrom = $state("");
 let wizardWindowTo = $state("");
+let wizardWindowDays = $state(DEFAULT_DAYS_WINDOW);
 let wizardMonths: string[] = $state([]);
 let wizardBusy = $state(false);
 let wizardInitializing = $state(false);
@@ -133,6 +134,29 @@ function resolveWizardDatasetRef() {
     v2Ref ||
     ""
   );
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function dateToUtc(value: string) {
+  if (!value) return null;
+  const parts = value.split("-");
+  if (parts.length < 3) return null;
+  const year = Number(parts[0]);
+  const month = Number(parts[1]);
+  const day = Number(parts[2]);
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return null;
+  return Date.UTC(year, month - 1, day);
+}
+
+function rangeDaysLabel(range: any) {
+  if (!Array.isArray(range) || range.length < 2) return "";
+  const start = dateToUtc(range[0]);
+  const end = dateToUtc(range[1]);
+  if (start == null || end == null) return "";
+  const days = Math.round(Math.abs(end - start) / DAY_MS);
+  if (!Number.isFinite(days)) return "";
+  return ` (${days} dias)`;
 }
 
 function connectSSE() {
@@ -247,7 +271,8 @@ function handle(msg: any) {
 
   if (t === "RESULTS_READY") {
     // payload.summary esperado desde /api/reconcile/start
-    results = msg?.payload?.summary || null;
+    const summary = msg?.payload?.summary ?? null;
+    results = summary || results || {};
     if (results?.days_window != null) {
       daysWindowStore.set(normalizeDaysWindow(results.days_window));
     }
@@ -284,6 +309,9 @@ function handleWizard(msg: any) {
     const windowRange = selection.window_range || {};
     if (windowRange.from) wizardWindowFrom = windowRange.from;
     if (windowRange.to) wizardWindowTo = windowRange.to;
+    const windowDays = normalizeDaysWindow(selection.window_days ?? DEFAULT_DAYS_WINDOW);
+    wizardWindowDays = windowDays;
+    daysWindowStore.set(windowDays);
     const previewRange = wizardState?.context?.preview?.range || [];
     if (!wizardWindowFrom && previewRange[0]) wizardWindowFrom = previewRange[0];
     if (!wizardWindowTo && previewRange[1]) wizardWindowTo = previewRange[1];
@@ -519,6 +547,7 @@ async function startWizard() {
   wizardMonths = [];
   wizardWindowFrom = "";
   wizardWindowTo = "";
+  wizardWindowDays = normalizeDaysWindow(get(daysWindowStore) ?? DEFAULT_DAYS_WINDOW);
   const detectedBank = resolveWizardBank();
   const detectedAccount = resolveWizardAccount();
   const datasetRef = resolveWizardDatasetRef();
@@ -605,7 +634,16 @@ function toggleMonth(month: string) {
   }
 }
 
+async function applyWizardWindowDays() {
+  const normalized = normalizeDaysWindow(wizardWindowDays);
+  wizardWindowDays = normalized;
+  daysWindowStore.set(normalized);
+  if (!wizardRunId || wizardStatus !== "ready") return;
+  await sendWizardAction("SELECT_WINDOW_DAYS", { window_days: normalized });
+}
+
 async function onWizardScopeNext() {
+  await applyWizardWindowDays();
   const modeApi = (wizardScopeMode === "ALL")
     ? "ALL_RANGE"
     : (wizardScopeMode === "RANGE" ? "WINDOW" : wizardScopeMode);
@@ -643,14 +681,17 @@ async function onWizardSelectionNext() {
 }
 
 async function onWizardConfirmSelection() {
-  if (!wizardConfirm) return;
-  await sendWizardAction("CONFIRM_START", { kind: wizardConfirm?.kind || "confirm" });
+  if (!wizardConfirm?.kind) return;
+  await sendWizardAction("CONFIRM", { kind: wizardConfirm.kind });
 }
 
 async function onWizardConfirmStart() {
+  if (reconciling) return;
+  await applyWizardWindowDays();
   await sendWizardAction("CONFIRM_START", { kind: "start" });
   wizardOpen = false;
-  showToast("info", "Configuración enviada. Esperando inicio...");
+  showToast("info", "Configuración enviada. Iniciando conciliación...");
+  await startReconcileDirect();
 }
 
 $effect(() => {
@@ -780,7 +821,7 @@ $effect(() => {
         <div class="mt-4 text-sm space-y-2">
           <div>
             <span class="font-semibold">Ventana maxima detectada:</span>
-            {wizardState.context.preview.range?.[0]} → {wizardState.context.preview.range?.[1]}
+            {wizardState.context.preview.range?.[0]} → {wizardState.context.preview.range?.[1]}{rangeDaysLabel(wizardState.context.preview.range)}
           </div>
           {#if (wizardState.context.preview.missing_months || []).length}
             <div>
@@ -809,6 +850,22 @@ $effect(() => {
         </div>
       {/if}
 
+      <div class="mt-4 text-sm">
+        <label class="flex items-center gap-3">
+          <span class="font-semibold">Ventana maxima (dias)</span>
+          <input
+            class="input input-bordered input-sm w-24"
+            type="number"
+            min="1"
+            max="365"
+            bind:value={wizardWindowDays}
+            on:change={applyWizardWindowDays}
+            disabled={wizardBusy || !wizardRunId || wizardStatus !== "ready"}
+          />
+        </label>
+        <p class="text-xs opacity-60 mt-1">Define la diferencia maxima en dias entre extracto y contable.</p>
+      </div>
+
       {#if wizardAlerts.length}
         <div class="alert alert-warning text-sm mt-3">
           <div>
@@ -818,6 +875,22 @@ $effect(() => {
                 <li>{alert?.message || "Revisar cobertura y outliers."}</li>
               {/each}
             </ul>
+          </div>
+        </div>
+      {/if}
+
+      {#if wizardConfirm}
+        <div class="alert alert-warning text-sm mt-3">
+          <div>
+            <span class="font-semibold">Confirmación requerida.</span>
+            <div>{wizardConfirm?.message || "Confirmá para continuar."}</div>
+            <button
+              class="btn btn-sm btn-warning mt-2"
+              on:click|preventDefault={onWizardConfirmSelection}
+              disabled={wizardBusy || !wizardRunId || wizardStatus !== "ready" || !wizardState}
+            >
+              Confirmar selección
+            </button>
           </div>
         </div>
       {/if}
@@ -929,6 +1002,10 @@ $effect(() => {
           {:else}
             rango completo
           {/if}
+        </div>
+        <div>
+          <span class="font-semibold">Ventana maxima (dias):</span>
+          {wizardState?.selection?.window_days ?? "N/A"}
         </div>
         <div>
           <span class="font-semibold">Rango detectado:</span>
@@ -1193,7 +1270,7 @@ $effect(() => {
 {/if}
 
 <!-- Resultados -->
-{#if results}
+{#if results || reconciling}
   <ReconciliarResumen client:load uriExtracto={previewExtracto?.original_uri} uriContable={previewContable?.original_uri} />
   <!-- Detalle separado, consumiendo /api/reconcile/details -->
   <ReconciliarDetalle

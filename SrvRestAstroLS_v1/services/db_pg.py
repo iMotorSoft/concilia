@@ -1,27 +1,47 @@
 # SrvRestAstroLS_v1/services/db_pg.py
 from __future__ import annotations
 
+import asyncio
 import asyncpg
 import json
 from typing import Any, Optional
 
-from globalVar import DB_SCHEMA, DB_URL
+from services.db_config import DB_SCHEMA, DB_URL, log_db_config_once, normalize_db_url
 from services.json_safe import json_default, to_jsonable
 
 
-def _normalize_db_url(url: str) -> str:
-    if url.startswith("postgresql+psycopg://"):
-        return "postgresql://" + url.split("postgresql+psycopg://", 1)[1]
-    if url.startswith("postgresql+asyncpg://"):
-        return "postgresql://" + url.split("postgresql+asyncpg://", 1)[1]
-    return url
-
-
-async def connect_db() -> asyncpg.Connection:
-    return await asyncpg.connect(
-        _normalize_db_url(DB_URL),
-        server_settings={"search_path": DB_SCHEMA},
-    )
+async def connect_db(
+    connect_timeout: float = 10.0,
+    statement_timeout_ms: int | None = None,
+    application_name: str = "concilia",
+    connect_retries: int = 1,
+    connect_retry_backoff: float = 0.5,
+) -> asyncpg.Connection:
+    log_db_config_once()
+    settings = {
+        "search_path": DB_SCHEMA,
+        "application_name": application_name,
+    }
+    if statement_timeout_ms is not None:
+        settings["statement_timeout"] = str(statement_timeout_ms)
+    attempts = max(1, int(connect_retries))
+    last_err: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return await asyncpg.connect(
+                normalize_db_url(DB_URL),
+                server_settings=settings,
+                timeout=connect_timeout,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            last_err = exc
+            if attempt >= attempts:
+                break
+            await asyncio.sleep(connect_retry_backoff * attempt)
+    assert last_err is not None
+    raise last_err
 
 
 async def get_workspace_by_slug(conn: asyncpg.Connection, slug: str) -> str:

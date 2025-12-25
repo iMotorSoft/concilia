@@ -617,7 +617,13 @@ async def reconcile_start(request: Any) -> Response:
             return Response({"ok": False, "message": "Faltan URIs: uri_extracto y uri_contable son obligatorios."}, status_code=400)
 
         # Core-only run initialization
-        core_conn = await core_connect_db()
+        # Long-running reconcile can scan 12 months, give DB time to finish.
+        core_conn = await core_connect_db(
+            connect_timeout=20.0,
+            connect_retries=3,
+            connect_retry_backoff=1.0,
+            statement_timeout_ms=300000,
+        )
         try:
             workspace_id = await get_workspace_by_slug(core_conn, workspace_slug)
         except ValueError:
@@ -761,6 +767,27 @@ async def reconcile_start(request: Any) -> Response:
 
         return Response({"ok": True, "summary": summary}, status_code=200)
 
+    except TimeoutError as e:
+        tb = traceback.format_exc(limit=8)
+        logger.exception("reconcile_start db timeout")
+        print("[reconcile_start] ERROR:", type(e).__name__, str(e), flush=True)
+        print(tb, flush=True)
+        if thread_id:
+            await _emit_event({
+                "type": "TOAST",
+                "level": "error",
+                "message": "Timeout conectando a la base de datos.",
+            })
+        return Response(
+            {
+                "ok": False,
+                "message": "Timeout conectando a la base de datos",
+                "error": f"{type(e).__name__}: {e}",
+                "trace": tb,
+                "where": "reconcile_start",
+            },
+            status_code=503,
+        )
     except Exception as e:
         tb = traceback.format_exc(limit=12)
         logger.exception("reconcile_start error")

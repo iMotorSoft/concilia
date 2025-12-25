@@ -37,6 +37,8 @@ from routes.v1.reconcile_summary import (
     reconcile_summary_head,         # solo head (totales)
     reconcile_summary_descomposicion,  # solo descomposición
 )  # NUEVO
+from routes.v1.reconcile_wizard_start import reconcile_wizard_start
+from routes.v1.run_action import run_action, run_events
 
 
 
@@ -56,6 +58,9 @@ route_handlers = [
     reconcile_summary,      # montamos reconcile_summary
     reconcile_summary_head,  # montamos head
     reconcile_summary_descomposicion,  # montamos descomposición
+    reconcile_wizard_start,
+    run_action,
+    run_events,
 ]
 
 

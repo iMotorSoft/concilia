@@ -8,11 +8,12 @@
 ## Findings (DSN/URL construction and connection initialization)
 | Archivo | Línea (aprox) | Tipo | Variables env usadas | DB hardcodeada | Respeta `globalVar.DB_URL` |
 | --- | --- | --- | --- | --- | --- |
-| `globalVar.py` | 54-66 | DSN builder (SQLAlchemy-style URL string) | `CONCIAI_DB_URL` (override), `DB_PG_IP`, `DB_PG_PORT`, `DB_PG_USER`, `DB_PG_PASS`, `DB_PG_WORKFLOW_AI` | default `workflow_ai_v1` (fallback) | N/A (define la fuente de verdad) |
-| `services/db_pg.py` | 11-23 | asyncpg | `DB_URL`, `DB_SCHEMA` (desde `globalVar`) | no | si |
-| `services/db_concilia_legacy.py` | 17-29 | asyncpg | `DB_URL`, `DB_SCHEMA` (desde `globalVar`) | no | si |
-| `scripts/analyze_db.py` | 5-19 | asyncpg | `DB_URL`, `DB_SCHEMA` (desde `globalVar`) | no | si |
-| `backend/tools/db_smoke_test.py` | 9-66 | asyncpg | `DB_URL`, `DB_SCHEMA` (desde `globalVar`), **DB_PG_\*** cargadas desde `~/.bashrc` si no están en `os.environ` | no | si (pero el `DB_URL` queda influenciado por la carga desde `.bashrc`) |
+| `globalVar.py` | 54-70 | DSN builder (SQLAlchemy-style URL string) | `DB_PG_IP`, `DB_PG_PORT`, `DB_PG_USER`, `DB_PG_PASS`, `DB_PG_WORKFLOW_AI`, `DB_SCHEMA` | default `workflow_ai_v1` (fallback) | N/A (define la fuente de verdad) |
+| `services/db_config.py` | 1-120 | DB config + normalizacion + logging | `DB_URL`, `DB_SCHEMA` (desde `globalVar`) | no | si |
+| `services/db_pg.py` | 1-40 | asyncpg (core) | `DB_URL`, `DB_SCHEMA` (via `services/db_config.py`) | no | si |
+| `services/db_concilia_legacy.py` | 1-40 | asyncpg (legacy) | `DB_URL`, `DB_SCHEMA` (via `services/db_config.py`) | no | si |
+| `scripts/analyze_db.py` | 1-30 | asyncpg | `DB_URL`, `DB_SCHEMA` (desde `globalVar`) | no | si |
+| `backend/tools/db_smoke_test.py` | 1-60 | asyncpg | `DB_URL`, `DB_SCHEMA` (via `services/db_config.py`) | no | si |
 | `backend/tools/core_run_smoke_test.py` | 6-45 | asyncpg (via `services/db_pg.connect_db`) | `DB_URL`, `DB_SCHEMA` (indirecto), **DB_PG_\*** cargadas desde `~/.bashrc` si no están en `os.environ` | no | si (indirecto) |
 
 ## Hardcode de DB "workflow_ai"
@@ -21,22 +22,21 @@
 
 ## Variables de entorno similares / potencialmente confusas
 - Usadas realmente por el código:
-  - `CONCIAI_DB_URL` (override de `DB_URL`)
-  - `CONCIAI_DB_SCHEMA`
-  - `DB_PG_*` (fallback para construir `DB_URL`)
-- **No se usa** `CONCILIA_DB_URL` ni `DATABASE_URL` en el código.
+  - `DB_PG_*` (para construir `DB_URL`)
+  - `DB_SCHEMA`
+- **No se usa** `CONCIAI_DB_URL`, `CONCILIA_DB_URL` ni `DATABASE_URL` en el codigo.
 - Si el entorno exporta `CONCILIA_DB_URL`, queda **ignorado** y se usa el fallback (que depende de `DB_PG_WORKFLOW_AI`).
 
 ## Duplicados de `globalVar`
 - No se detectaron archivos alternativos (solo `globalVar.py` en la raíz).
 
-## Plan mínimo de corrección (sin implementar)
-- `globalVar.py`: aceptar alias `CONCILIA_DB_URL` (y opcionalmente `DATABASE_URL`) además de `CONCIAI_DB_URL`, o emitir warning claro si `CONCILIA_DB_URL` está seteada pero no se usa. Esto evita que el servicio ignore el env correcto por typo de nombre.
-- `backend/tools/db_smoke_test.py`: eliminar `_load_env_from_bashrc()` o migrarlo a lectura exclusiva de `DB_URL` (para evitar que un export antiguo de `DB_PG_WORKFLOW_AI=workflow_ai` se cuele en pruebas).
-- `backend/tools/core_run_smoke_test.py`: mismo ajuste que arriba (no cargar `.bashrc`, usar solo `DB_URL`).
-- No se requieren cambios en `services/db_pg.py`, `services/db_concilia_legacy.py` ni `scripts/analyze_db.py`: ya respetan `globalVar.DB_URL` + `DB_SCHEMA`.
+## Notas recientes
+- Se centralizo la config en `services/db_config.py` (normalizacion de host IPv4, logging seguro de host/puerto/db/schema).
+- `connect_db` ahora acepta `connect_timeout` y `statement_timeout_ms` en `services/db_pg.py` y `services/db_concilia_legacy.py`.
+- `backend/tools/db_smoke_test.py` valida conectividad core + legacy con timeouts explicitos.
+- `backend/tools/core_run_smoke_test.py` sigue cargando variables desde `~/.bashrc`.
 
 ## Root cause candidate #1/#2/#3 (ordenado por probabilidad)
-1) `CONCIAI_DB_URL` está definido en el entorno con `.../workflow_ai` y está sobreescribiendo el default.  
-2) `DB_PG_WORKFLOW_AI` está definido como `workflow_ai` (p. ej. export en entorno/servicio o `.bashrc`), y `CONCIAI_DB_URL` no está seteado.  
-3) El entorno está seteando `CONCILIA_DB_URL` (no `CONCIAI_DB_URL`), por lo que se ignora y se cae al fallback basado en `DB_PG_WORKFLOW_AI` (posiblemente antiguo).
+1) `DB_PG_WORKFLOW_AI` apunta a la DB incorrecta (export en entorno/servicio o `.bashrc`).  
+2) `DB_PG_IP`/`DB_PG_PORT` apuntan al host equivocado o no accesible.  
+3) `DB_SCHEMA` no coincide con el schema esperado (objetos faltantes).
