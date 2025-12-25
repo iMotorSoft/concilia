@@ -6,6 +6,7 @@ import json
 from typing import Any, Optional
 
 from globalVar import DB_SCHEMA, DB_URL
+from services.json_safe import json_default, to_jsonable
 
 
 def _normalize_db_url(url: str) -> str:
@@ -41,8 +42,8 @@ async def create_run(
     status: str = "running",
     params: Optional[dict[str, Any]] = None,
 ) -> str:
-    params_json = json.dumps(params or {})
-    return await conn.fetchval(
+    params_json = json.dumps(to_jsonable(params or {}), default=json_default)
+    run_id = await conn.fetchval(
         """
         INSERT INTO core_runs (workspace_id, kind, status, params, started_at)
         VALUES ($1, $2, $3, $4::jsonb, now())
@@ -53,6 +54,7 @@ async def create_run(
         status,
         params_json,
     )
+    return str(run_id)
 
 
 async def append_event(
@@ -63,7 +65,7 @@ async def append_event(
     type: str,
     payload: Optional[dict[str, Any]] = None,
 ) -> None:
-    payload_json = json.dumps(payload or {})
+    payload_json = json.dumps(to_jsonable(payload or {}), default=json_default)
     await conn.execute(
         """
         INSERT INTO core_events (workspace_id, run_id, type, payload)

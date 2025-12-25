@@ -3,9 +3,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import Any, Dict, List, Optional
+
+import anyio
 from litestar import get
 from litestar.response import Stream
+
+from services.json_safe import json_default, to_jsonable
+
+logger = logging.getLogger(__name__)
 
 SSE_HEADERS = {
     "Cache-Control": "no-cache",
@@ -25,7 +32,8 @@ def _topic(thread_id: Optional[str]) -> str:
     return thread_id or "global"
 
 def _sse(payload: Dict[str, Any]) -> str:
-    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+    safe_payload = to_jsonable(payload)
+    return f"data: {json.dumps(safe_payload, default=json_default, ensure_ascii=False)}\n\n"
 
 async def emit(thread_id: Optional[str], payload: Dict[str, Any]) -> None:
     """Encola un evento para el topic; si no hay suscriptor aún, lo bufferiza."""
@@ -45,14 +53,25 @@ async def notify_stream(threadId: Optional[str] = None) -> Stream:
     async def gen():
         try:
             # saludo / debug
-            yield _sse({"type": "DEBUG", "stage": "CONNECTED", "threadId": t})
+            try:
+                yield _sse({"type": "DEBUG", "stage": "CONNECTED", "threadId": t})
+            except Exception:
+                logger.exception("Failed to serialize AG-UI debug payload", extra={"thread_id": t})
             # flush de pendientes si los había
             for p in _PENDING.pop(t, []):
-                yield _sse(p)
+                try:
+                    yield _sse(p)
+                except Exception:
+                    logger.exception("Failed to serialize AG-UI pending payload", extra={"thread_id": t})
             # loop normal
             while True:
                 payload = await q.get()
-                yield _sse(payload)
+                try:
+                    yield _sse(payload)
+                except Exception:
+                    logger.exception("Failed to serialize AG-UI payload", extra={"thread_id": t})
+        except (asyncio.CancelledError, anyio.get_cancelled_exc_class()):
+            return
         finally:
             try:
                 if _SUBS.get(t) is q:
@@ -61,4 +80,3 @@ async def notify_stream(threadId: Optional[str] = None) -> Stream:
                 pass
 
     return Stream(gen(), headers=SSE_HEADERS)
-
