@@ -264,12 +264,15 @@ function handle(msg: any) {
 
 function handleWizard(msg: any) {
   const t = (msg?.type || "").toUpperCase();
+  const payload = typeof msg?.payload === "string"
+    ? (() => { try { return JSON.parse(msg.payload); } catch { return msg.payload; } })()
+    : (msg?.payload ?? null);
 
   if (t === "HEARTBEAT") return;
   wizardEvents = [...wizardEvents, msg].slice(-40);
 
   if (t === "WIZARD_STATE_SET") {
-    wizardState = msg?.payload || null;
+    wizardState = payload || null;
     wizardStatus = "ready";
     wizardError = null;
     const selection = wizardState?.selection || {};
@@ -290,8 +293,8 @@ function handleWizard(msg: any) {
   }
 
   if (t === "STEP_SET") {
-    wizardStepId = msg?.payload?.step_id || wizardStepId;
-    wizardStepTitle = msg?.payload?.title || "";
+    wizardStepId = payload?.step_id || wizardStepId;
+    wizardStepTitle = payload?.title || "";
     wizardConfirm = null;
     if (wizardStatus !== "ready") wizardStatus = "ready";
     return;
@@ -311,22 +314,22 @@ function handleWizard(msg: any) {
   }
 
   if (t === "ALERT_ADD") {
-    wizardAlerts = [...wizardAlerts, msg?.payload];
+    wizardAlerts = [...wizardAlerts, payload];
     return;
   }
 
   if (t === "FORM_SNAPSHOT") {
-    wizardForm = msg?.payload?.form || null;
+    wizardForm = payload?.form || null;
     return;
   }
 
   if (t === "LIST_SNAPSHOT") {
-    wizardListItems = msg?.payload?.items || [];
+    wizardListItems = payload?.items || [];
     return;
   }
 
   if (t === "CONFIRMATION_REQUIRED") {
-    wizardConfirm = msg?.payload || {};
+    wizardConfirm = payload || {};
     return;
   }
 
@@ -335,8 +338,8 @@ function handleWizard(msg: any) {
     return;
   }
 
-  if (t === "TEXT_MESSAGE_ADD" && msg?.payload?.text) {
-    showToast("info", msg.payload.text);
+  if (t === "TEXT_MESSAGE_ADD" && payload?.text) {
+    showToast("info", payload.text);
   }
 }
 
@@ -603,17 +606,20 @@ function toggleMonth(month: string) {
 }
 
 async function onWizardScopeNext() {
+  const modeApi = (wizardScopeMode === "ALL")
+    ? "ALL_RANGE"
+    : (wizardScopeMode === "RANGE" ? "WINDOW" : wizardScopeMode);
   if (wizardScopeMode === "ALL") {
-    await sendWizardAction("SELECT_SCOPE", { mode: "ALL" });
+    await sendWizardAction("SELECT_SCOPE", { mode: modeApi });
     return;
   }
   if (wizardScopeMode === "MONTHS") {
-    await sendWizardAction("SELECT_SCOPE", { mode: "MONTHS" });
+    await sendWizardAction("SELECT_SCOPE", { mode: modeApi });
     return;
   }
   if (wizardScopeMode === "RANGE") {
     await sendWizardAction("SELECT_SCOPE", {
-      mode: "RANGE",
+      mode: modeApi,
     });
   }
 }
@@ -632,7 +638,7 @@ async function onWizardSelectionNext() {
       showToast("warning", "Seleccioná un rango válido.");
       return;
     }
-    await sendWizardAction("SELECT_SCOPE", { mode: "RANGE", from: wizardWindowFrom, to: wizardWindowTo });
+    await sendWizardAction("SELECT_SCOPE", { mode: "WINDOW", from: wizardWindowFrom, to: wizardWindowTo });
   }
 }
 
