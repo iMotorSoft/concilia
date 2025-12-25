@@ -28,6 +28,36 @@ let previewContable: any = $state(null);
 let reconciling = $state(false);
 let results: any = $state(null);
 
+// Wizard
+let wizardOpen = $state(false);
+let wizardDialogRef: HTMLDialogElement | null = null;
+let wizardRunId = $state<string | null>(null);
+let wizardThreadId = $state<string | null>(null);
+let wizardSseUrl = $state<string | null>(null);
+let wizardSse: EventSource | null = null;
+let wizardNotifySse: EventSource | null = null;
+let wizardNotifyThreadId: string | null = null;
+let wizardStatus = $state<"idle"|"opening"|"starting"|"ready"|"error">("idle");
+let wizardError: string | null = $state(null);
+let wizardEvents: any[] = $state([]);
+let wizardState: any = $state(null);
+let wizardStepId = $state("SCOPE");
+let wizardStepTitle = $state("");
+let wizardAlerts: any[] = $state([]);
+let wizardForm: any = $state(null);
+let wizardListItems: any[] = $state([]);
+let wizardConfirm: any = $state(null);
+let wizardScopeMode = $state("ALL");
+let wizardWindowFrom = $state("");
+let wizardWindowTo = $state("");
+let wizardMonths: string[] = $state([]);
+let wizardBusy = $state(false);
+let wizardInitializing = $state(false);
+let wizardAccountInput = $state("");
+let wizardBankInput = $state("");
+let wizardNeedsAccount = $state(false);
+let wizardNeedsBank = $state(false);
+
 let es: EventSource | null = null;
 let toast: { level: "info"|"success"|"warning"|"error"; message: string } | null = $state(null);
 let toastTimer: any = null;
@@ -49,6 +79,12 @@ $effect(() => {
   if (!dialogOpen && dialogRef.open) dialogRef.close?.();
 });
 
+$effect(() => {
+  if (!wizardDialogRef) return;
+  if (wizardOpen && !wizardDialogRef.open) wizardDialogRef.showModal?.();
+  if (!wizardOpen && wizardDialogRef.open) wizardDialogRef.close?.();
+});
+
 function seedFormDefaults(spec: any) {
   const d: Record<string, any> = {};
   for (const f of (spec?.fields ?? [])) {
@@ -59,6 +95,46 @@ function seedFormDefaults(spec: any) {
   fileObjs = [];
 }
 
+function resolveWizardBank() {
+  return (
+    previewExtracto?.detected?.bank ||
+    previewContable?.detected?.bank ||
+    ""
+  );
+}
+
+function resolveWizardAccount() {
+  return (
+    previewExtracto?.detected?.account_full ||
+    previewExtracto?.detected?.account_core_dv ||
+    previewExtracto?.detected?.account ||
+    previewExtracto?.detected?.account_id ||
+    previewContable?.detected?.account_full ||
+    previewContable?.detected?.account_core_dv ||
+    previewContable?.detected?.account ||
+    previewContable?.detected?.account_id ||
+    ""
+  );
+}
+
+function resolveWizardDatasetRef() {
+  const extracto = previewExtracto || {};
+  const originalUri = (extracto?.original_uri || "").toString();
+  const v2Ref = originalUri && !originalUri.startsWith("file://") ? originalUri : "";
+  const uploads = Array.isArray(extracto?.meta?.uploads) ? extracto.meta.uploads : [];
+  const uploadCanonical = uploads.find((u: any) => u?.canonical_uri)?.canonical_uri || "";
+  return (
+    extracto?.dataset_ref ||
+    extracto?.canonical_uri ||
+    extracto?.manifest_uri ||
+    extracto?.meta?.manifest_uri ||
+    extracto?.meta?.canonical_uri ||
+    uploadCanonical ||
+    v2Ref ||
+    ""
+  );
+}
+
 function connectSSE() {
   if (es) es.close();
   es = new EventSource(`${URL_REST}/api/ag-ui/notify/stream?threadId=${encodeURIComponent(threadId)}`);
@@ -66,6 +142,50 @@ function connectSSE() {
     try { handle(JSON.parse(ev.data)); } catch {}
   };
   es.onerror = () => showToast("error", "Conexión SSE caída.");
+}
+
+function connectWizardNotifySSE(targetThreadId: string) {
+  if (!targetThreadId) return;
+  if (targetThreadId === threadId) {
+    if (!es) connectSSE();
+    return;
+  }
+  if (wizardNotifySse && wizardNotifyThreadId === targetThreadId) return;
+  if (wizardNotifySse) wizardNotifySse.close();
+  wizardNotifyThreadId = targetThreadId;
+  wizardNotifySse = new EventSource(
+    `${URL_REST}/api/ag-ui/notify/stream?threadId=${encodeURIComponent(targetThreadId)}`
+  );
+  wizardNotifySse.onmessage = (ev) => {
+    try { handle(JSON.parse(ev.data)); } catch {}
+  };
+  wizardNotifySse.onerror = () => showToast("error", "Conexión SSE del wizard caída.");
+}
+
+function connectWizardSSE(runId: string, sseUrl?: string | null) {
+  if (wizardSse) wizardSse.close();
+  const url = sseUrl
+    ? (sseUrl.startsWith("http") ? sseUrl : `${URL_REST}${sseUrl}`)
+    : `${URL_REST}/api/reconcile_wizard/runs/${runId}/events`;
+  wizardSse = new EventSource(url);
+  wizardSse.onopen = () => {
+    wizardError = null;
+  };
+  wizardSse.onmessage = (ev) => {
+    try { handleWizard(JSON.parse(ev.data)); } catch {}
+  };
+  wizardSse.onerror = () => {
+    wizardInitializing = false;
+    wizardStatus = "error";
+    wizardError = "No se pudo conectar con los eventos del asistente.";
+    showToast("error", "Conexión SSE del wizard caída.");
+  };
+}
+
+function wizardStepIndex() {
+  if (wizardStepId === "SUMMARY") return 3;
+  if (wizardStepId === "MONTHS" || wizardStepId === "WINDOW") return 2;
+  return 1;
 }
 
 function handle(msg: any) {
@@ -119,6 +239,7 @@ function handle(msg: any) {
   }
 
   if (t === "RUN_START") {
+    if (wizardOpen) wizardOpen = false;
     reconciling = true; // spinner ON
     showToast("success", "Iniciando conciliación…");
     return;
@@ -138,6 +259,84 @@ function handle(msg: any) {
   if (t === "TEXT_MESSAGE_CONTENT" && msg.delta) {
     showToast("info", msg.delta);
     return;
+  }
+}
+
+function handleWizard(msg: any) {
+  const t = (msg?.type || "").toUpperCase();
+
+  if (t === "HEARTBEAT") return;
+  wizardEvents = [...wizardEvents, msg].slice(-40);
+
+  if (t === "WIZARD_STATE_SET") {
+    wizardState = msg?.payload || null;
+    wizardStatus = "ready";
+    wizardError = null;
+    const selection = wizardState?.selection || {};
+    const scopeMode = (selection.scope_mode || "").toUpperCase();
+    wizardScopeMode =
+      scopeMode === "WINDOW" ? "RANGE" :
+      scopeMode === "MANUAL" ? "MONTHS" : "ALL";
+    wizardMonths = selection.months || [];
+    const windowRange = selection.window_range || {};
+    if (windowRange.from) wizardWindowFrom = windowRange.from;
+    if (windowRange.to) wizardWindowTo = windowRange.to;
+    const previewRange = wizardState?.context?.preview?.range || [];
+    if (!wizardWindowFrom && previewRange[0]) wizardWindowFrom = previewRange[0];
+    if (!wizardWindowTo && previewRange[1]) wizardWindowTo = previewRange[1];
+    if (wizardState?.step) wizardStepId = wizardState.step;
+    wizardInitializing = false;
+    return;
+  }
+
+  if (t === "STEP_SET") {
+    wizardStepId = msg?.payload?.step_id || wizardStepId;
+    wizardStepTitle = msg?.payload?.title || "";
+    wizardConfirm = null;
+    if (wizardStatus !== "ready") wizardStatus = "ready";
+    return;
+  }
+
+  if (t === "RUN_STARTED") {
+    wizardInitializing = true;
+    wizardStatus = "starting";
+    return;
+  }
+
+  if (t === "RUN_FAILED") {
+    wizardInitializing = false;
+    wizardStatus = "error";
+    wizardError = msg?.payload?.error || "El asistente falló al inicializar.";
+    return;
+  }
+
+  if (t === "ALERT_ADD") {
+    wizardAlerts = [...wizardAlerts, msg?.payload];
+    return;
+  }
+
+  if (t === "FORM_SNAPSHOT") {
+    wizardForm = msg?.payload?.form || null;
+    return;
+  }
+
+  if (t === "LIST_SNAPSHOT") {
+    wizardListItems = msg?.payload?.items || [];
+    return;
+  }
+
+  if (t === "CONFIRMATION_REQUIRED") {
+    wizardConfirm = msg?.payload || {};
+    return;
+  }
+
+  if (t === "RUN_READY_TO_EXECUTE") {
+    showToast("success", "Plan listo. Confirmá para iniciar.");
+    return;
+  }
+
+  if (t === "TEXT_MESSAGE_ADD" && msg?.payload?.text) {
+    showToast("info", msg.payload.text);
   }
 }
 
@@ -238,8 +437,7 @@ async function onConfirmPreview(role: "extracto"|"contable") {
   }
 }
 
-// ===== Iniciar conciliación (aparece solo si ambos confirmados) =====
-async function startReconcile() {
+async function startReconcileDirect() {
   if (!(previewExtracto?.confirmed && previewContable?.confirmed)) {
     showToast("warning", "Faltan confirmar ambos archivos.");
     return;
@@ -275,6 +473,175 @@ async function startReconcile() {
     reconciling = false;
     showToast("error", "No se pudo iniciar la conciliación.");
   }
+}
+
+async function sendWizardAction(actionType: string, payload: Record<string, any>) {
+  if (!wizardRunId) return;
+  try {
+    const res = await fetch(`${URL_REST}/api/reconcile_wizard/runs/${wizardRunId}/action`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action_type: actionType, payload }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  } catch {
+    showToast("error", "No se pudo enviar la acción del wizard.");
+  }
+}
+
+async function startWizard() {
+  if (!(previewExtracto?.confirmed && previewContable?.confirmed)) {
+    showToast("warning", "Faltan confirmar ambos archivos.");
+    return;
+  }
+  wizardOpen = true;
+  wizardStatus = "opening";
+  wizardError = null;
+  wizardBusy = true;
+  wizardInitializing = true;
+  wizardEvents = [];
+  wizardRunId = null;
+  wizardThreadId = null;
+  wizardSseUrl = null;
+  wizardNeedsAccount = false;
+  wizardNeedsBank = false;
+  wizardAlerts = [];
+  wizardForm = null;
+  wizardListItems = [];
+  wizardConfirm = null;
+  wizardState = null;
+  wizardStepTitle = "";
+  wizardStepId = "SCOPE";
+  wizardScopeMode = "ALL";
+  wizardMonths = [];
+  wizardWindowFrom = "";
+  wizardWindowTo = "";
+  const detectedBank = resolveWizardBank();
+  const detectedAccount = resolveWizardAccount();
+  const datasetRef = resolveWizardDatasetRef();
+  wizardBankInput = detectedBank || wizardBankInput;
+  wizardAccountInput = detectedAccount || wizardAccountInput;
+  wizardBankInput = (wizardBankInput || "").trim();
+  wizardAccountInput = (wizardAccountInput || "").trim();
+  if (!wizardBankInput) {
+    wizardStatus = "error";
+    wizardNeedsBank = true;
+    wizardError = "Banco no detectado. Revisá la vista previa antes de continuar.";
+    wizardInitializing = false;
+    wizardBusy = false;
+    return;
+  }
+  if (!wizardAccountInput) {
+    wizardStatus = "error";
+    wizardNeedsAccount = true;
+    wizardError = "Cuenta no detectada. Completá la cuenta para iniciar el asistente.";
+    wizardInitializing = false;
+    wizardBusy = false;
+    return;
+  }
+  if (!datasetRef) {
+    wizardStatus = "error";
+    wizardError = "Dataset canónico no disponible. Esperá a que termine la canonicalización.";
+    wizardInitializing = false;
+    wizardBusy = false;
+    return;
+  }
+  try {
+    wizardStatus = "starting";
+    const payload = {
+      workspace_id: previewExtracto?.workspace_id || previewContable?.workspace_id || "",
+      bank: wizardBankInput,
+      account: wizardAccountInput,
+      dataset_ref: datasetRef,
+    };
+    const res = await fetch(`${URL_REST}/api/reconcile_wizard/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const j = await res.json();
+    if (j?.status && j.status !== "ok") {
+      throw new Error(`status ${j.status}`);
+    }
+    wizardRunId = j?.run_id || null;
+    wizardThreadId = j?.thread_id || null;
+    wizardSseUrl = j?.sse_url || null;
+    if (!wizardRunId) throw new Error("run_id vacío");
+    connectWizardSSE(wizardRunId, wizardSseUrl);
+    if (wizardThreadId) connectWizardNotifySSE(wizardThreadId);
+  } catch {
+    wizardStatus = "error";
+    wizardError = "No se pudo iniciar el asistente. Reintentá en unos segundos.";
+    showToast("error", "No se pudo iniciar el asistente.");
+    wizardInitializing = false;
+  } finally {
+    wizardBusy = false;
+  }
+}
+
+function retryWizard() {
+  wizardError = null;
+  if (wizardRunId) {
+    wizardStatus = "starting";
+    wizardInitializing = true;
+    connectWizardSSE(wizardRunId, wizardSseUrl);
+    return;
+  }
+  startWizard();
+}
+
+function toggleMonth(month: string) {
+  if (wizardMonths.includes(month)) {
+    wizardMonths = wizardMonths.filter((m) => m !== month);
+  } else {
+    wizardMonths = [...wizardMonths, month];
+  }
+}
+
+async function onWizardScopeNext() {
+  if (wizardScopeMode === "ALL") {
+    await sendWizardAction("SELECT_SCOPE", { mode: "ALL" });
+    return;
+  }
+  if (wizardScopeMode === "MONTHS") {
+    await sendWizardAction("SELECT_SCOPE", { mode: "MONTHS" });
+    return;
+  }
+  if (wizardScopeMode === "RANGE") {
+    await sendWizardAction("SELECT_SCOPE", {
+      mode: "RANGE",
+    });
+  }
+}
+
+async function onWizardSelectionNext() {
+  if (wizardStepId === "MONTHS") {
+    if (!wizardMonths.length) {
+      showToast("warning", "Seleccioná al menos un mes.");
+      return;
+    }
+    await sendWizardAction("SELECT_SCOPE", { mode: "MONTHS", months: wizardMonths });
+    return;
+  }
+  if (wizardStepId === "WINDOW") {
+    if (!wizardWindowFrom || !wizardWindowTo) {
+      showToast("warning", "Seleccioná un rango válido.");
+      return;
+    }
+    await sendWizardAction("SELECT_SCOPE", { mode: "RANGE", from: wizardWindowFrom, to: wizardWindowTo });
+  }
+}
+
+async function onWizardConfirmSelection() {
+  if (!wizardConfirm) return;
+  await sendWizardAction("CONFIRM_START", { kind: wizardConfirm?.kind || "confirm" });
+}
+
+async function onWizardConfirmStart() {
+  await sendWizardAction("CONFIRM_START", { kind: "start" });
+  wizardOpen = false;
+  showToast("info", "Configuración enviada. Esperando inicio...");
 }
 
 $effect(() => {
@@ -351,6 +718,232 @@ $effect(() => {
         <button class="btn" on:click={() => (dialogOpen = false)} disabled={uploadBusy}>Cerrar</button>
       </form>
     </div>
+  </div>
+</dialog>
+
+<!-- Modal Wizard -->
+<dialog class="modal" bind:this={wizardDialogRef} on:close={() => (wizardOpen = false)}>
+  <div class="modal-box max-w-3xl">
+    <div class="flex items-center justify-between gap-2">
+      <h3 class="font-bold text-lg">Asistente de Conciliación</h3>
+      <span class="badge">Paso {wizardStepIndex()}/3</span>
+    </div>
+    {#if wizardStepTitle}
+      <p class="text-sm opacity-70 mt-1">{wizardStepTitle}</p>
+    {/if}
+    {#if wizardEvents.length}
+      <p class="text-xs opacity-60 mt-1">
+        Último evento: {wizardEvents[wizardEvents.length - 1]?.type || "—"}
+      </p>
+    {/if}
+    {#if wizardStatus === "error" && wizardError}
+      <div class="alert alert-error text-sm mt-3">
+        <div class="flex flex-col gap-2 w-full">
+          <span>{wizardError}</span>
+          {#if wizardNeedsBank || wizardNeedsAccount}
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
+              <label class="flex flex-col gap-1">
+                <span class="opacity-70">Banco</span>
+                <input class="input input-bordered input-sm" type="text" bind:value={wizardBankInput} />
+              </label>
+              <label class="flex flex-col gap-1">
+                <span class="opacity-70">Cuenta</span>
+                <input class="input input-bordered input-sm" type="text" bind:value={wizardAccountInput} />
+              </label>
+            </div>
+          {/if}
+          <div>
+            <button class="btn btn-sm btn-primary" on:click|preventDefault={retryWizard} disabled={wizardBusy}>
+              Reintentar
+            </button>
+          </div>
+        </div>
+      </div>
+    {/if}
+    {#if wizardInitializing}
+      <div class="alert alert-info text-sm mt-3">
+        <span>Inicializando asistente…</span>
+      </div>
+    {/if}
+
+    {#if wizardStepIndex() === 1}
+      {#if wizardState?.context?.preview}
+        <div class="mt-4 text-sm space-y-2">
+          <div>
+            <span class="font-semibold">Ventana maxima detectada:</span>
+            {wizardState.context.preview.range?.[0]} → {wizardState.context.preview.range?.[1]}
+          </div>
+          {#if (wizardState.context.preview.missing_months || []).length}
+            <div>
+              <span class="font-semibold">Meses faltantes:</span>
+              {wizardState.context.preview.missing_months.join(", ")}
+            </div>
+          {/if}
+          {#if (wizardState.context.preview.partial_months || []).length}
+            <div>
+              <span class="font-semibold">Meses parciales:</span>
+              {wizardState.context.preview.partial_months.map((m:any)=>m.month).join(", ")}
+            </div>
+          {/if}
+          {#if (wizardState.context.preview.gaps || []).length}
+            <div>
+              <span class="font-semibold">Gaps detectados:</span>
+              {wizardState.context.preview.gaps.map((g:any)=>`${g.from} → ${g.to}`).join(", ")}
+            </div>
+          {/if}
+          {#if (wizardState.context.preview.outliers || []).length}
+            <div>
+              <span class="font-semibold">Outliers:</span>
+              {wizardState.context.preview.outliers.map((o:any)=>o.date).join(", ")}
+            </div>
+          {/if}
+        </div>
+      {/if}
+
+      {#if wizardAlerts.length}
+        <div class="alert alert-warning text-sm mt-3">
+          <div>
+            <span class="font-semibold">Atención:</span>
+            <ul class="list-disc ml-6">
+              {#each wizardAlerts as alert}
+                <li>{alert?.message || "Revisar cobertura y outliers."}</li>
+              {/each}
+            </ul>
+          </div>
+        </div>
+      {/if}
+
+      <div class="mt-4 space-y-2">
+        <p class="font-semibold">Elegí el alcance</p>
+        <label class="flex items-center gap-2">
+          <input type="radio" bind:group={wizardScopeMode} value="ALL" />
+          <span>Todo el rango detectado</span>
+        </label>
+        <label class="flex items-center gap-2">
+          <input type="radio" bind:group={wizardScopeMode} value="MONTHS" />
+          <span>Elegir meses</span>
+        </label>
+        <label class="flex items-center gap-2">
+          <input type="radio" bind:group={wizardScopeMode} value="RANGE" />
+          <span>Ventana por rango de fechas</span>
+        </label>
+      </div>
+
+      <div class="modal-action">
+        <button
+          class="btn btn-primary"
+          on:click|preventDefault={onWizardScopeNext}
+          disabled={wizardBusy || !wizardRunId || wizardStatus !== "ready" || !wizardState}
+        >
+          Continuar
+        </button>
+        <form method="dialog">
+          <button class="btn" on:click={() => (wizardOpen = false)}>Cerrar</button>
+        </form>
+      </div>
+    {:else if wizardStepIndex() === 2}
+      {#if wizardStepId === "MONTHS"}
+        <div class="mt-3 space-y-2">
+          <p class="font-semibold text-sm">Seleccioná meses disponibles</p>
+          {#if !wizardListItems.length}
+            <p class="text-sm opacity-70">Cargando meses…</p>
+          {:else}
+            {#each wizardListItems as item}
+              <label class="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  disabled={!item.selectable}
+                  checked={wizardMonths.includes(item.month)}
+                  on:change={() => toggleMonth(item.month)}
+                />
+                <span>{item.month}</span>
+                <span class="badge badge-outline">{item.status}</span>
+                {#if item.status === "partial" && (item.missing_days || []).length}
+                  <span class="opacity-60">faltan {item.missing_days.length} dias</span>
+                {/if}
+              </label>
+            {/each}
+          {/if}
+        </div>
+      {:else}
+        <div class="mt-3 space-y-2 text-sm">
+          <p class="font-semibold">Definí ventana</p>
+          <div class="grid grid-cols-2 gap-3">
+            <label class="flex flex-col gap-1">
+              <span class="opacity-70">Desde</span>
+              <input class="input input-bordered input-sm" type="date" bind:value={wizardWindowFrom} />
+            </label>
+            <label class="flex flex-col gap-1">
+              <span class="opacity-70">Hasta</span>
+              <input class="input input-bordered input-sm" type="date" bind:value={wizardWindowTo} />
+            </label>
+          </div>
+        </div>
+      {/if}
+
+      {#if wizardConfirm}
+        <div class="alert alert-warning text-sm mt-3">
+          <div>
+            <span class="font-semibold">Confirmación requerida.</span>
+            <div>{wizardConfirm?.message || "Confirmá para continuar."}</div>
+            <button
+              class="btn btn-sm btn-warning mt-2"
+              on:click|preventDefault={onWizardConfirmSelection}
+              disabled={wizardBusy || !wizardRunId || wizardStatus !== "ready" || !wizardState}
+            >
+              Confirmar selección
+            </button>
+          </div>
+        </div>
+      {/if}
+
+      <div class="modal-action">
+        <button
+          class="btn btn-primary"
+          on:click|preventDefault={onWizardSelectionNext}
+          disabled={wizardBusy || !wizardRunId || wizardStatus !== "ready" || !wizardState}
+        >
+          Continuar
+        </button>
+        <form method="dialog">
+          <button class="btn" on:click={() => (wizardOpen = false)}>Cerrar</button>
+        </form>
+      </div>
+    {:else}
+      <div class="mt-3 space-y-2 text-sm">
+        <p class="font-semibold">Resumen</p>
+        <div><span class="font-semibold">Meses:</span> {(wizardState?.selection?.months || []).join(", ") || "N/A"}</div>
+        <div>
+          <span class="font-semibold">Ventana:</span>
+          {#if wizardState?.selection?.window_range}
+            {wizardState.selection.window_range.from} → {wizardState.selection.window_range.to}
+          {:else}
+            rango completo
+          {/if}
+        </div>
+        <div>
+          <span class="font-semibold">Rango detectado:</span>
+          {wizardState?.context?.preview?.range?.[0]} → {wizardState?.context?.preview?.range?.[1]}
+        </div>
+        <div>
+          <span class="font-semibold">Archivos:</span>
+          {(wizardState?.context?.preview?.files || []).length}
+        </div>
+      </div>
+
+      <div class="modal-action">
+        <button
+          class="btn btn-primary"
+          on:click|preventDefault={onWizardConfirmStart}
+          disabled={wizardBusy || !wizardRunId || wizardStatus !== "ready" || !wizardState}
+        >
+          Confirmar e iniciar
+        </button>
+        <form method="dialog">
+          <button class="btn" on:click={() => (wizardOpen = false)}>Cerrar</button>
+        </form>
+      </div>
+    {/if}
   </div>
 </dialog>
 
@@ -580,11 +1173,11 @@ $effect(() => {
 <!-- CTA: Iniciar conciliación -->
 {#if previewExtracto?.confirmed && previewContable?.confirmed}
   <div class="mt-4 flex">
-    <button class="btn btn-primary" on:click|preventDefault={startReconcile} disabled={reconciling} aria-busy={reconciling}>
-      {#if reconciling}
-        <span class="loading loading-spinner loading-sm mr-2" /> Iniciando…
+    <button class="btn btn-primary" on:click|preventDefault={startWizard} disabled={wizardBusy || reconciling} aria-busy={wizardBusy || reconciling}>
+      {#if wizardBusy}
+        <span class="loading loading-spinner loading-sm mr-2" /> Abriendo…
       {:else}
-        Iniciar conciliación
+        Abrir asistente de conciliación
       {/if}
     </button>
   </div>
