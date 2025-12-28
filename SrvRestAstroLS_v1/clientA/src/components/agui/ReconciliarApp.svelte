@@ -136,27 +136,10 @@ function resolveWizardDatasetRef() {
   );
 }
 
-const DAY_MS = 24 * 60 * 60 * 1000;
-
-function dateToUtc(value: string) {
-  if (!value) return null;
-  const parts = value.split("-");
-  if (parts.length < 3) return null;
-  const year = Number(parts[0]);
-  const month = Number(parts[1]);
-  const day = Number(parts[2]);
-  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return null;
-  return Date.UTC(year, month - 1, day);
-}
-
-function rangeDaysLabel(range: any) {
-  if (!Array.isArray(range) || range.length < 2) return "";
-  const start = dateToUtc(range[0]);
-  const end = dateToUtc(range[1]);
-  if (start == null || end == null) return "";
-  const days = Math.round(Math.abs(end - start) / DAY_MS);
+function daysLabel(value: any) {
+  const days = Number(value);
   if (!Number.isFinite(days)) return "";
-  return ` (${days} dias)`;
+  return ` (${Math.round(days)} dias)`;
 }
 
 function connectSSE() {
@@ -585,6 +568,8 @@ async function startWizard() {
       bank: wizardBankInput,
       account: wizardAccountInput,
       dataset_ref: datasetRef,
+      uri_extracto: previewExtracto?.canonical_uri || previewExtracto?.original_uri || "",
+      uri_contable: previewContable?.canonical_uri || previewContable?.original_uri || "",
     };
     const res = await fetch(`${URL_REST}/api/reconcile_wizard/start`, {
       method: "POST",
@@ -818,33 +803,51 @@ $effect(() => {
 
     {#if wizardStepIndex() === 1}
       {#if wizardState?.context?.preview}
+        {@const preview = wizardState.context.preview}
+        {@const windowMax = preview.window_max}
         <div class="mt-4 text-sm space-y-2">
           <div>
             <span class="font-semibold">Ventana maxima detectada:</span>
-            {wizardState.context.preview.range?.[0]} → {wizardState.context.preview.range?.[1]}{rangeDaysLabel(wizardState.context.preview.range)}
+            {#if windowMax?.range?.[0] && windowMax?.range?.[1]}
+              {windowMax.range[0]} → {windowMax.range[1]}{daysLabel(windowMax.days)}
+            {:else}
+              <span class="opacity-60">N/A</span>
+            {/if}
           </div>
-          {#if (wizardState.context.preview.missing_months || []).length}
+          {#if windowMax?.pair}
+            <div class="text-xs opacity-70 space-y-1">
+              <div>
+                <span class="font-semibold">Extracto:</span>
+                {windowMax.pair.extracto?.fecha || "—"}, doc {windowMax.pair.extracto?.documento || "—"}, monto {windowMax.pair.extracto?.monto ?? "—"}
+              </div>
+              <div>
+                <span class="font-semibold">Contable:</span>
+                {windowMax.pair.contable?.fecha || "—"}, doc {windowMax.pair.contable?.documento || "—"}, monto {windowMax.pair.contable?.monto ?? "—"}
+              </div>
+            </div>
+          {/if}
+          {#if (preview.missing_months || []).length}
             <div>
               <span class="font-semibold">Meses faltantes:</span>
-              {wizardState.context.preview.missing_months.join(", ")}
+              {preview.missing_months.join(", ")}
             </div>
           {/if}
-          {#if (wizardState.context.preview.partial_months || []).length}
+          {#if (preview.partial_months || []).length}
             <div>
               <span class="font-semibold">Meses parciales:</span>
-              {wizardState.context.preview.partial_months.map((m:any)=>m.month).join(", ")}
+              {preview.partial_months.map((m:any)=>m.month).join(", ")}
             </div>
           {/if}
-          {#if (wizardState.context.preview.gaps || []).length}
+          {#if (preview.gaps || []).length}
             <div>
               <span class="font-semibold">Gaps detectados:</span>
-              {wizardState.context.preview.gaps.map((g:any)=>`${g.from} → ${g.to}`).join(", ")}
+              {preview.gaps.map((g:any)=>`${g.from} → ${g.to}`).join(", ")}
             </div>
           {/if}
-          {#if (wizardState.context.preview.outliers || []).length}
+          {#if (preview.outliers || []).length}
             <div>
               <span class="font-semibold">Outliers:</span>
-              {wizardState.context.preview.outliers.map((o:any)=>o.date).join(", ")}
+              {preview.outliers.map((o:any)=>o.date).join(", ")}
             </div>
           {/if}
         </div>
@@ -885,7 +888,7 @@ $effect(() => {
             <span class="font-semibold">Confirmación requerida.</span>
             <div>{wizardConfirm?.message || "Confirmá para continuar."}</div>
             <button
-              class="btn btn-sm btn-warning mt-2"
+              class="btn btn-sm btn-warning btn-outline bg-base-100 mt-2"
               on:click|preventDefault={onWizardConfirmSelection}
               disabled={wizardBusy || !wizardRunId || wizardStatus !== "ready" || !wizardState}
             >
@@ -915,7 +918,7 @@ $effect(() => {
         <button
           class="btn btn-primary"
           on:click|preventDefault={onWizardScopeNext}
-          disabled={wizardBusy || !wizardRunId || wizardStatus !== "ready" || !wizardState}
+          disabled={wizardBusy || !wizardRunId || wizardStatus !== "ready" || !wizardState || !!wizardConfirm}
         >
           Continuar
         </button>
@@ -969,7 +972,7 @@ $effect(() => {
             <span class="font-semibold">Confirmación requerida.</span>
             <div>{wizardConfirm?.message || "Confirmá para continuar."}</div>
             <button
-              class="btn btn-sm btn-warning mt-2"
+              class="btn btn-sm btn-warning btn-outline bg-base-100 mt-2"
               on:click|preventDefault={onWizardConfirmSelection}
               disabled={wizardBusy || !wizardRunId || wizardStatus !== "ready" || !wizardState}
             >
@@ -983,7 +986,7 @@ $effect(() => {
         <button
           class="btn btn-primary"
           on:click|preventDefault={onWizardSelectionNext}
-          disabled={wizardBusy || !wizardRunId || wizardStatus !== "ready" || !wizardState}
+          disabled={wizardBusy || !wizardRunId || wizardStatus !== "ready" || !wizardState || !!wizardConfirm}
         >
           Continuar
         </button>

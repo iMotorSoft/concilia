@@ -30,6 +30,8 @@ async def _initialize_wizard_background(
     bank: str,
     account: str,
     dataset_ref: str,
+    uri_extracto: str | None,
+    uri_contable: str | None,
 ):
     """
     Background task to initialize the wizard state and append initial events.
@@ -38,7 +40,13 @@ async def _initialize_wizard_background(
     conn = await core_connect_db(connect_timeout=10.0, statement_timeout_ms=15000)
     try:
         # Simulate heavy work or actually do it
-        preview = get_extract_preview(dataset_ref, bank, account)
+        preview = get_extract_preview(
+            dataset_ref,
+            bank,
+            account,
+            uri_extracto=uri_extracto,
+            uri_contable=uri_contable,
+        )
         state = init_state(
             {"bank": bank, "account": account, "dataset_ref": dataset_ref},
             preview,
@@ -78,6 +86,8 @@ async def reconcile_wizard_start(data: Dict[str, Any]) -> Response:
     bank = data.get("bank") or ""
     account = data.get("account") or ""
     dataset_ref = data.get("dataset_ref") or ""
+    uri_extracto = data.get("uri_extracto")
+    uri_contable = data.get("uri_contable")
 
     logger.info(f"reconcile_wizard_start: bank={bank}, account={account}, dataset_ref={dataset_ref}")
 
@@ -104,6 +114,8 @@ async def reconcile_wizard_start(data: Dict[str, Any]) -> Response:
                 "bank": bank,
                 "account": account,
                 "dataset_ref": dataset_ref,
+                "uri_extracto": uri_extracto,
+                "uri_contable": uri_contable,
             },
         )
     except Exception:
@@ -117,7 +129,15 @@ async def reconcile_wizard_start(data: Dict[str, Any]) -> Response:
 
     # Fire and forget the heavy initialization
     asyncio.create_task(
-        _initialize_wizard_background(workspace_id, run_id, bank, account, dataset_ref)
+        _initialize_wizard_background(
+            workspace_id,
+            run_id,
+            bank,
+            account,
+            dataset_ref,
+            uri_extracto,
+            uri_contable,
+        )
     )
 
     return Response(
