@@ -1,15 +1,23 @@
 <script lang="ts">
   // src/components/agui/ReconciliarResumen.svelte
   import { URL_REST } from '../global';
+  import { authFetch as fetch } from '../auth/transport.js';
   import { daysWindowStore, DEFAULT_DAYS_WINDOW, normalizeDaysWindow } from './reconcileConfig';
+  import CopyTableButton from './CopyTableButton.svelte';
 
   const props = $props<{
     uriExtracto?: string;
     uriContable?: string;
+    uriSicom?: string;
+    bankScope?: string;
+    accountScope?: string;
   }>();
 
   const uriExtracto = $derived(props.uriExtracto ?? "");
   const uriContable = $derived(props.uriContable ?? "");
+  const uriSicom = $derived(props.uriSicom ?? "");
+  const bankScope = $derived(props.bankScope ?? "");
+  const accountScope = $derived(props.accountScope ?? "");
 
   let daysWindow = $state(DEFAULT_DAYS_WINDOW); // editable por input
   let appliedDaysWindow = $state(DEFAULT_DAYS_WINDOW); // último valor aplicado con botón
@@ -65,6 +73,9 @@
       const fd = new FormData();
       fd.set("uri_extracto", uriExtr || "");
       fd.set("uri_contable", uriCont || "");
+      fd.set("uri_sicom", uriSicom || "");
+      fd.set("bank_scope", bankScope || "");
+      fd.set("account_scope", accountScope || "");
       fd.set("days_window", String(windowDays || DEFAULT_DAYS_WINDOW));
 
       const res = await fetch(`${URL_REST}/api/reconcile/summary/head`, { method: "POST", body: fd });
@@ -97,6 +108,9 @@
       const fd = new FormData();
       fd.set("uri_extracto", uriExtr || "");
       fd.set("uri_contable", uriCont || "");
+      fd.set("uri_sicom", uriSicom || "");
+      fd.set("bank_scope", bankScope || "");
+      fd.set("account_scope", accountScope || "");
       fd.set("days_window", String(windowDays || DEFAULT_DAYS_WINDOW));
 
       const res = await fetch(`${URL_REST}/api/reconcile/summary/descomposicion`, { method: "POST", body: fd });
@@ -130,10 +144,13 @@
     }
   }
 
-  let lastUris = $state({ extr: "", cont: "" });
+  let lastUris = $state({ extr: "", cont: "", sicom: "", bank: "", account: "" });
   $effect(() => {
     const extr = uriExtracto;
     const cont = uriContable;
+    const sicom = uriSicom;
+    const bank = bankScope;
+    const account = accountScope;
     if (!extr || !cont) {
       summaryHead = null;
       descomposicion = null;
@@ -144,8 +161,14 @@
       }
       return;
     }
-    if (extr !== lastUris.extr || cont !== lastUris.cont) {
-      lastUris = { extr, cont };
+    if (
+      extr !== lastUris.extr ||
+      cont !== lastUris.cont ||
+      sicom !== lastUris.sicom ||
+      bank !== lastUris.bank ||
+      account !== lastUris.account
+    ) {
+      lastUris = { extr, cont, sicom, bank, account };
       refreshAll(appliedDaysWindow);
     }
   });
@@ -188,6 +211,7 @@
     <div class="text-xs opacity-60">
       <div><b>Extracto:</b> {uriExtracto || "—"}</div>
       <div><b>Contable:</b> {uriContable || "—"}</div>
+      <div><b>SICOM:</b> {uriSicom || "—"}</div>
     </div>
 
     {#if errorHead}
@@ -206,25 +230,48 @@
           <div class="stat-value text-lg">{summaryHead?.movimientos_banco ?? "—"}</div>
         </div>
         <div class="stat bg-base-200 rounded-xl">
-          <div class="stat-title">Conciliados (pares)</div>
+          <div class="stat-title">Coincidencias directas 1→1</div>
           <div class="stat-value text-lg">{summaryHead?.conciliados_pares ?? "—"}</div>
         </div>
       </div>
 
-      <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mt-3 text-sm">
-        <div class="stat bg-base-200 rounded-xl">
-          <div class="stat-title">No en Banco</div>
-          <div class="stat-value text-lg">{summaryHead?.no_en_banco ?? "—"}</div>
+      {#if summaryHead?.sicom?.final_reconciliation}
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mt-3 text-sm">
+          <div class="stat bg-success/10 rounded-xl">
+            <div class="stat-title">PILAGA con contraparte en extracto</div>
+            <div class="stat-value text-lg">{summaryHead?.sicom?.final_reconciliation?.pilaga_rows_with_extracto ?? "—"}</div>
+            <div class="stat-desc">
+              {summaryHead?.sicom?.final_reconciliation?.pilaga_unique_ops_with_extracto ?? "—"} OP únicas
+            </div>
+          </div>
+          <div class="stat bg-success/10 rounded-xl">
+            <div class="stat-title">Lotes banco con soporte contable</div>
+            <div class="stat-value text-lg">{summaryHead?.sicom?.final_reconciliation?.extracto_lotes_with_contable_support ?? "—"}</div>
+            <div class="stat-desc">
+              vía `PILAGA → SICOM → extracto`
+            </div>
+          </div>
+          <div class="stat bg-base-200 rounded-xl">
+            <div class="stat-title">Ventana (días)</div>
+            <div class="stat-value text-lg">{summaryHead?.days_window ?? "—"}</div>
+          </div>
         </div>
-        <div class="stat bg-base-200 rounded-xl">
-          <div class="stat-title">No en PILAGA</div>
-          <div class="stat-value text-lg">{summaryHead?.no_en_pilaga ?? "—"}</div>
+      {:else}
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mt-3 text-sm">
+          <div class="stat bg-base-200 rounded-xl">
+            <div class="stat-title">No en Banco</div>
+            <div class="stat-value text-lg">{summaryHead?.no_en_banco ?? "—"}</div>
+          </div>
+          <div class="stat bg-base-200 rounded-xl">
+            <div class="stat-title">No en PILAGA</div>
+            <div class="stat-value text-lg">{summaryHead?.no_en_pilaga ?? "—"}</div>
+          </div>
+          <div class="stat bg-base-200 rounded-xl">
+            <div class="stat-title">Ventana (días)</div>
+            <div class="stat-value text-lg">{summaryHead?.days_window ?? "—"}</div>
+          </div>
         </div>
-        <div class="stat bg-base-200 rounded-xl">
-          <div class="stat-title">Ventana (días)</div>
-          <div class="stat-value text-lg">{summaryHead?.days_window ?? "—"}</div>
-        </div>
-      </div>
+      {/if}
 
       <!-- Totales nuevos -->
       <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
@@ -259,13 +306,90 @@
         </div>
       </div>
 
+      {#if summaryHead?.sicom?.used}
+        <div class="card bg-base-200 mt-4">
+          <div class="card-body">
+            <h4 class="font-semibold">SICOM: trazabilidad operativa y cierre bancario</h4>
+            <p class="text-sm opacity-80">
+              `SICOM` se usa para explicar lotes y reconstruir el puente entre `OP` contable y banco.
+              El cierre principal sigue siendo `PILAGA ↔ extracto`.
+            </p>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
+              <div>
+                <span class="opacity-70">Scope del caso:</span><br/>
+                <b>{summaryHead?.sicom?.scope?.bank_scope || "—"}</b>
+              </div>
+              <div>
+                <span class="opacity-70">Cuenta:</span><br/>
+                <b>{summaryHead?.sicom?.scope?.account_scope_raw || "—"}</b>
+              </div>
+              <div>
+                <span class="opacity-70">Filtrado aplicado:</span><br/>
+                <b>{summaryHead?.sicom?.scope?.scope_applied ? "Sí" : "No"}</b>
+              </div>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-3 text-sm mt-3">
+              <div><span class="opacity-70">Filas SICOM:</span><br/><b>{summaryHead?.sicom?.source?.rows_scoped ?? "—"} / {summaryHead?.sicom?.source?.rows_total ?? "—"}</b></div>
+              <div><span class="opacity-70">OP únicas:</span><br/><b>{summaryHead?.sicom?.source?.op_count_scoped ?? "—"}</b></div>
+              <div><span class="opacity-70">Nro Pago únicos:</span><br/><b>{summaryHead?.sicom?.source?.nro_pago_count_scoped ?? "—"}</b></div>
+              <div><span class="opacity-70">Lotes:</span><br/><b>{summaryHead?.sicom?.source?.lote_count_scoped ?? "—"}</b></div>
+            </div>
+            <div class="mt-3 text-sm">
+              <span class="opacity-70">Bancos en scope:</span>
+              <b> {(summaryHead?.sicom?.source?.banks_scoped || []).join(", ") || "—"}</b>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm mt-4">
+              <div>
+                <div class="font-medium">1. Lotes SICOM que pegan en extracto</div>
+                <div class="mt-1">Lotes exactos: <b>{summaryHead?.sicom?.extracto_coverage?.matched_lotes ?? "—"} / {summaryHead?.sicom?.extracto_coverage?.total_lotes ?? "—"}</b></div>
+                <div>Importe conciliado por lote: <b>${formatNumber(summaryHead?.sicom?.extracto_coverage?.matched_amount)}</b></div>
+                <div>Cobertura por cantidad: <b>{formatNumber(summaryHead?.sicom?.extracto_coverage?.coverage_count_pct)}%</b></div>
+                <div>Cobertura por importe: <b>{formatNumber(summaryHead?.sicom?.extracto_coverage?.coverage_amount_pct)}%</b></div>
+              </div>
+              <div>
+                <div class="font-medium">2. Trazabilidad operativa `PILAGA → SICOM`</div>
+                <div class="mt-1">Filas con match OP + importe: <b>{summaryHead?.sicom?.pilaga_coverage?.matched_rows ?? "—"}</b></div>
+                <div>OP únicas con match: <b>{summaryHead?.sicom?.pilaga_coverage?.matched_unique_ops ?? "—"}</b></div>
+                <div>Importe trazado: <b>${formatNumber(summaryHead?.sicom?.pilaga_coverage?.matched_amount)}</b></div>
+              </div>
+              <div>
+                <div class="font-medium">3. Cierre efectivo `PILAGA → SICOM → extracto`</div>
+                <div class="mt-1">Filas PILAGA con contraparte bancaria: <b>{summaryHead?.sicom?.final_reconciliation?.pilaga_rows_with_extracto ?? "—"}</b></div>
+                <div>OP únicas con contraparte bancaria: <b>{summaryHead?.sicom?.final_reconciliation?.pilaga_unique_ops_with_extracto ?? "—"}</b></div>
+                <div>Importe bruto de egresos PILAGA trazados: <b>${formatNumber(summaryHead?.sicom?.final_reconciliation?.pilaga_amount_with_extracto)}</b></div>
+                <div>Lotes de extracto con soporte contable: <b>{summaryHead?.sicom?.final_reconciliation?.extracto_lotes_with_contable_support ?? "—"}</b></div>
+                <div>Importe de extracto con soporte contable: <b>${formatNumber(summaryHead?.sicom?.final_reconciliation?.extracto_amount_with_contable_support)}</b></div>
+              </div>
+            </div>
+            <div class="mt-4 text-sm grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div class="rounded-lg border border-base-300 p-3">
+                <div class="font-medium">Explicado por SICOM pero no cerrado contra extracto</div>
+                <div class="mt-1">Filas PILAGA solo trazadas: <b>{summaryHead?.sicom?.final_reconciliation?.pilaga_rows_traced_only ?? "—"}</b></div>
+                <div>Importe bruto solo trazado: <b>${formatNumber(summaryHead?.sicom?.final_reconciliation?.pilaga_amount_traced_only)}</b></div>
+              </div>
+              <div class="rounded-lg border border-base-300 p-3">
+                <div class="font-medium">Lotes de extracto explicados por SICOM sin soporte contable</div>
+                <div class="mt-1">Lotes: <b>{summaryHead?.sicom?.final_reconciliation?.extracto_lotes_only_sicom ?? "—"}</b></div>
+                <div>Importe: <b>${formatNumber(summaryHead?.sicom?.final_reconciliation?.extracto_amount_only_sicom)}</b></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      {/if}
+
       <div class="card bg-base-200 mt-4">
         <div class="card-body">
           <h4 class="font-semibold">Descomposición de movimientos</h4>
           {#if descomposicion}
-            <p class="text-sm opacity-80">Estas cuatro categorías son disjuntas y suman el resultado del período de cada lado.</p>
+            <p class="text-sm opacity-80">
+              Estas categorías describen el motor directo de matching (`1→1`, agrupados y sugeridos).
+              No equivalen por sí solas al cierre final vía `SICOM`.
+            </p>
+            <div class="flex justify-end mb-2">
+              <CopyTableButton tableId="descomposicion-table" />
+            </div>
             <div class="overflow-x-auto">
-              <table class="table table-sm">
+              <table id="descomposicion-table" class="table table-sm">
                 <thead>
                   <tr>
                     <th>Categoría</th>
@@ -305,6 +429,17 @@
               <span>Procesando… {(descompElapsedMs/1000).toFixed(1)}s</span>
             </div>
           {/if}
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3 text-sm">
+        <div class="stat bg-base-200 rounded-xl">
+          <div class="stat-title">PILAGA sin reflejo bancario directo</div>
+          <div class="stat-value text-lg">{summaryHead?.no_en_banco ?? "—"}</div>
+        </div>
+        <div class="stat bg-base-200 rounded-xl">
+          <div class="stat-title">Banco sin reflejo contable directo</div>
+          <div class="stat-value text-lg">{summaryHead?.no_en_pilaga ?? "—"}</div>
         </div>
       </div>
 

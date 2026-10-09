@@ -1,7 +1,19 @@
 <script lang="ts">
+  import { authFetch as fetch } from '../../auth/transport.js';
   import { daysWindowStore, DEFAULT_DAYS_WINDOW, normalizeDaysWindow } from '../reconcileConfig';
+  import CopyTableButton from '../CopyTableButton.svelte';
 
-  type SimpleRow = { fecha: string; monto: number; documento: string };
+  type SimpleRow = {
+    fecha: string;
+    monto: number;
+    documento: string;
+    sicom?: {
+      lot_matches?: { banco_raw?: string; nro_pago?: string }[];
+      op_key?: string;
+      exact_matches?: { banco_raw?: string; nro_pago?: string }[];
+      op_match_count?: number;
+    } | null;
+  };
   type GroupRow = {
     // N→1 clásico: banco (target) + PILAGA componentes
     bank_row?: SimpleRow | null;
@@ -11,6 +23,8 @@
     bank_rows?: SimpleRow[];
     monto_total?: number;
     estado?: string;
+    audit_status?: string;
+    audit_reason?: string;
     direction?: "p_to_bank" | "bank_to_pilaga";
   };
 
@@ -18,13 +32,19 @@
     urlRest: string;
     extractoUri: string;
     contableUri: string;
+    sicomUri?: string;
+    bankScope?: string;
+    accountScope?: string;
   }>();
 
   const urlRest = $derived(props.urlRest || "");
   const extractoUri = $derived(props.extractoUri || "");
   const contableUri = $derived(props.contableUri || "");
+  const sicomUri = $derived(props.sicomUri || "");
+  const bankScope = $derived(props.bankScope || "");
+  const accountScope = $derived(props.accountScope || "");
 
-  const TITLE = "Sugeridos (N→1)";
+  const TITLE = "Agrupaciones sugeridas / auditoría";
   const ENDPOINT = "/api/reconcile/details/n1/sugeridos";
 
   let expanded = $state(false);
@@ -37,6 +57,7 @@ let daysWindow = $state(DEFAULT_DAYS_WINDOW);
 let lastSourceFingerprint: string | null = null;
 let elapsedMs = $state(0);
 let timerId: any = null;
+let calculated = $state(false);
 
   function fmtMoney(value: number | string | null | undefined) {
     if (value === null || value === undefined) return "—";
@@ -60,6 +81,7 @@ let timerId: any = null;
 function resetState() {
   expanded = false;
   loading = false;
+  calculated = false;
   errorMsg = null;
   rows = [];
   countDisplay = null;
@@ -81,7 +103,8 @@ function resetState() {
   $effect(() => {
     const extr = extractoUri || "";
     const cont = contableUri || "";
-    const fingerprint = `${extr}|${cont}`;
+    const sic = sicomUri || "";
+    const fingerprint = `${extr}|${cont}|${sic}|${bankScope}|${accountScope}`;
     if (fingerprint === lastSourceFingerprint) return;
     lastSourceFingerprint = fingerprint;
     resetState();
@@ -102,11 +125,39 @@ function resetState() {
     return row?.bank_row;
   }
 
+  function sicomLabel(row?: SimpleRow | null): string {
+    const lot = row?.sicom?.lot_matches?.[0];
+    if (lot) return `${lot?.banco_raw || "SICOM"} · lote ${lot?.nro_pago || "—"}`;
+    const exact = row?.sicom?.exact_matches?.[0];
+    if (exact) return `${row?.sicom?.op_key || "OP"} · lote ${exact?.nro_pago || "—"}`;
+    if (row?.sicom?.op_key) return `${row.sicom.op_key} · ${row?.sicom?.op_match_count ?? 0} match(es)`;
+    return "";
+  }
+
+  function stateLabel(row: GroupRow): string {
+    if (row?.audit_status === "rechazado_sicom" || row?.estado === "sicom_auditoria") return "Auditoría SICOM";
+    return row?.direction === "bank_to_pilaga" ? "1→N (Banco)" : "N→1 (Banco)";
+  }
+
+  function extractOpKey(value?: string | null): string {
+    const txt = String(value || "").toUpperCase();
+    const match = txt.match(/(\d+\/\d{4})/);
+    return match?.[1] || "";
+  }
+
+  function opListLabel(rows?: SimpleRow[] | null): string {
+    const keys = Array.from(new Set((rows || []).map((item) => extractOpKey(item?.documento)).filter(Boolean)));
+    if (!keys.length) return "—";
+    if (keys.length <= 4) return keys.join(", ");
+    return `${keys.slice(0, 4).join(", ")} +${keys.length - 4}`;
+  }
+
 async function fetchData() {
   if (!extractoUri || !contableUri) {
     errorMsg = "Faltan archivos confirmados.";
     return;
   }
+  if (calculated) return;
   expanded = true; // mostrar cuerpo mientras calcula
   loading = true;
   elapsedMs = 0;
@@ -120,6 +171,9 @@ async function fetchData() {
       const fd = new FormData();
       fd.set("uri_extracto", extractoUri || "");
       fd.set("uri_contable", contableUri || "");
+      fd.set("uri_sicom", sicomUri || "");
+      fd.set("bank_scope", bankScope || "");
+      fd.set("account_scope", accountScope || "");
       fd.set("days_window", String(daysWindow ?? DEFAULT_DAYS_WINDOW));
 
       const res = await fetch(`${urlRest}${ENDPOINT}`, { method: "POST", body: fd });
@@ -133,6 +187,7 @@ async function fetchData() {
       const providedTotal = typeof payload.total_amount === "number" ? payload.total_amount : null;
       const inferredTotal = rows.reduce((acc, r) => acc + (Number(r?.monto_total) || sumComponents(r)), 0);
       totalAmount = providedTotal ?? inferredTotal;
+      calculated = true;
   } catch (err: any) {
     errorMsg = err?.message || "No se pudo cargar el detalle.";
     rows = [];
@@ -177,10 +232,10 @@ async function fetchData() {
     <button
       class="btn btn-primary btn-xs"
       on:click|preventDefault|stopPropagation={fetchData}
-      disabled={loading}
+      disabled={loading || calculated}
       aria-busy={loading}
     >
-      {#if loading}Calculando…{:else}Calcular{/if}
+      {#if loading}Calculando…{:else if calculated}Calculado{:else}Calcular{/if}
     </button>
   </div>
 
@@ -195,13 +250,16 @@ async function fetchData() {
         <div class="alert alert-error">{errorMsg}</div>
       {:else}
         <div class="space-y-4">
-          {#each rows as r}
+          {#each rows as r, index}
             <div class="border border-base-200 rounded-lg overflow-hidden">
               <div class="flex flex-wrap items-center justify-between gap-2 px-4 py-2 bg-base-200">
                 <div class="flex items-center gap-2 text-sm">
-                  <span class="badge badge-outline">{r?.direction === "bank_to_pilaga" ? "1→N (Banco)" : "N→1 (Banco)"}</span>
+                  <span class={"badge badge-outline " + ((r?.audit_status === "rechazado_sicom" || r?.estado === "sicom_auditoria") ? "badge-warning" : "")}>{stateLabel(r)}</span>
                   <span class="opacity-80">Target: {targetRow(r)?.fecha ?? "—"} — {fmtMoney(targetRow(r)?.monto)}</span>
                   <span class="opacity-60 max-w-[320px] truncate" title={targetRow(r)?.documento}>{targetRow(r)?.documento ?? "—"}</span>
+                  {#if sicomLabel(targetRow(r))}
+                    <span class="text-xs opacity-70">{sicomLabel(targetRow(r))}</span>
+                  {/if}
                 </div>
                 <div class="flex items-center gap-2 text-sm">
                   <span class="badge badge-neutral badge-outline">{(r?.direction === "bank_to_pilaga" ? r?.bank_rows?.length : r?.pilaga_rows?.length) ?? 0} componentes</span>
@@ -210,14 +268,30 @@ async function fetchData() {
               </div>
 
               <div class="px-4 py-3 overflow-x-auto">
+                <div class="text-xs opacity-70 mb-2">
+                  {#if r?.direction === "bank_to_pilaga"}
+                    OP objetivo: <b>{extractOpKey(r?.pilaga_row?.documento) || "—"}</b>
+                  {:else}
+                    OP involucradas: <b>{opListLabel(r?.pilaga_rows)}</b>
+                  {/if}
+                </div>
+                {#if r?.audit_reason}
+                  <div class="alert alert-warning py-2 mb-2 text-xs">
+                    <span>{r.audit_reason}</span>
+                  </div>
+                {/if}
                 <div class="text-xs opacity-70 mb-1">
                   {r?.direction === "bank_to_pilaga" ? "Componentes banco" : "Componentes PILAGA"}
                 </div>
-                <table class="table table-xs">
+                <div class="flex justify-end mb-2">
+                  <CopyTableButton tableId={`sugeridos-n-a-uno-${index}`} />
+                </div>
+                <table id={`sugeridos-n-a-uno-${index}`} class="table table-xs">
                   <thead>
                     <tr>
                       <th>Fecha</th>
                       <th>Monto</th>
+                      <th>OP</th>
                       <th>Documento</th>
                     </tr>
                   </thead>
@@ -227,22 +301,34 @@ async function fetchData() {
                         <tr>
                           <td>{br?.fecha ?? "—"}</td>
                           <td>{fmtMoney(br?.monto)}</td>
-                          <td class="max-w-[320px] truncate" title={br?.documento}>{br?.documento ?? "—"}</td>
+                          <td>—</td>
+                          <td class="max-w-[320px] truncate" title={br?.documento}>
+                            <div>{br?.documento ?? "—"}</div>
+                            {#if sicomLabel(br)}
+                              <div class="text-xs opacity-70">{sicomLabel(br)}</div>
+                            {/if}
+                          </td>
                         </tr>
                       {/each}
                       {#if !(r?.bank_rows || []).length}
-                        <tr><td colspan="3" class="opacity-60">Sin componentes</td></tr>
+                        <tr><td colspan="4" class="opacity-60">Sin componentes</td></tr>
                       {/if}
                     {:else}
                       {#each r?.pilaga_rows || [] as pr}
                         <tr>
                           <td>{pr?.fecha ?? "—"}</td>
                           <td>{fmtMoney(pr?.monto)}</td>
-                          <td class="max-w-[320px] truncate" title={pr?.documento}>{pr?.documento ?? "—"}</td>
+                          <td>{extractOpKey(pr?.documento) || "—"}</td>
+                          <td class="max-w-[320px] truncate" title={pr?.documento}>
+                            <div>{pr?.documento ?? "—"}</div>
+                            {#if sicomLabel(pr)}
+                              <div class="text-xs opacity-70">{sicomLabel(pr)}</div>
+                            {/if}
+                          </td>
                         </tr>
                       {/each}
                       {#if !(r?.pilaga_rows || []).length}
-                        <tr><td colspan="3" class="opacity-60">Sin componentes</td></tr>
+                        <tr><td colspan="4" class="opacity-60">Sin componentes</td></tr>
                       {/if}
                     {/if}
                   </tbody>

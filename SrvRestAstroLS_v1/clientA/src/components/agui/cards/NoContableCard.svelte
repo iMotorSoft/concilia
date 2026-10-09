@@ -1,18 +1,35 @@
 <script lang="ts">
+  import { authFetch as fetch } from '../../auth/transport.js';
   import { daysWindowStore, DEFAULT_DAYS_WINDOW, normalizeDaysWindow } from '../reconcileConfig';
+  import CopyTableButton from '../CopyTableButton.svelte';
 
-  type DetailRow = { fecha: string; monto: number; documento: string };
+  type SicomLotMatch = { fecha_pago?: string; banco_raw?: string; nro_pago?: string; imp_neto?: number; op_count?: number };
+  type DetailRow = {
+    fecha: string;
+    monto: number;
+    documento: string;
+    sicom?: {
+      match_count?: number;
+      lot_matches?: SicomLotMatch[];
+    } | null;
+  };
 
   const props = $props<{
     urlRest: string;
     extractoUri: string;
     contableUri: string;
+    sicomUri?: string;
+    bankScope?: string;
+    accountScope?: string;
     summary?: Record<string, any> | null;
   }>();
 
   const urlRest = $derived(props.urlRest || "");
   const extractoUri = $derived(props.extractoUri || "");
   const contableUri = $derived(props.contableUri || "");
+  const sicomUri = $derived(props.sicomUri || "");
+  const bankScope = $derived(props.bankScope || "");
+  const accountScope = $derived(props.accountScope || "");
   const summary = $derived(props.summary ?? null);
 
   const TITLE = "Banco No reflejado en PILAGA";
@@ -28,6 +45,7 @@ let daysWindow = $state(DEFAULT_DAYS_WINDOW);
 let lastSourceFingerprint: string | null = null;
 let elapsedMs = $state(0);
 let timerId: any = null;
+let calculated = $state(false);
 
   function fmtMoney(value: number | string | null | undefined) {
     if (value === null || value === undefined) return "—";
@@ -52,6 +70,7 @@ let timerId: any = null;
 function resetState() {
   expanded = false;
   loading = false;
+  calculated = false;
   errorMsg = null;
   rows = [];
   countDisplay = null;
@@ -80,11 +99,22 @@ function resetState() {
   $effect(() => {
     const extr = extractoUri || "";
     const cont = contableUri || "";
-    const fingerprint = `${extr}|${cont}`;
+    const sic = sicomUri || "";
+    const fingerprint = `${extr}|${cont}|${sic}|${bankScope}|${accountScope}`;
     if (fingerprint === lastSourceFingerprint) return;
     lastSourceFingerprint = fingerprint;
     resetState();
   });
+
+  function sicomSummary(row: DetailRow): string {
+    const sicom = row?.sicom;
+    const lots = sicom?.lot_matches || [];
+    if (lots.length) {
+      const first = lots[0];
+      return `${first?.banco_raw || "SICOM"} · lote ${first?.nro_pago || "—"} · ${first?.op_count ?? 0} OP`;
+    }
+    return "—";
+  }
 
   async function toggleExpanded() {
     expanded = !expanded;
@@ -95,6 +125,7 @@ async function fetchData() {
     errorMsg = "Faltan archivos confirmados.";
     return;
   }
+  if (calculated) return;
   expanded = true; // mostrar cuerpo mientras calcula
   loading = true;
   elapsedMs = 0;
@@ -108,6 +139,9 @@ async function fetchData() {
       const fd = new FormData();
       fd.set("uri_extracto", extractoUri || "");
       fd.set("uri_contable", contableUri || "");
+      fd.set("uri_sicom", sicomUri || "");
+      fd.set("bank_scope", bankScope || "");
+      fd.set("account_scope", accountScope || "");
       fd.set("days_window", String(daysWindow ?? DEFAULT_DAYS_WINDOW));
 
       const res = await fetch(`${urlRest}${ENDPOINT}`, { method: "POST", body: fd });
@@ -119,6 +153,7 @@ async function fetchData() {
       const inferredCount = typeof payload.total === "number" ? payload.total : rows.length;
       countDisplay = inferredCount;
       totalAmount = typeof payload.total_amount === "number" ? payload.total_amount : rows.reduce((acc, r) => acc + (Number(r.monto) || 0), 0);
+      calculated = true;
   } catch (err: any) {
     errorMsg = err?.message || "No se pudo cargar el detalle.";
     rows = [];
@@ -163,10 +198,10 @@ async function fetchData() {
     <button
       class="btn btn-primary btn-xs"
       on:click|preventDefault|stopPropagation={fetchData}
-      disabled={loading}
+      disabled={loading || calculated}
       aria-busy={loading}
     >
-      {#if loading}Calculando…{:else}Calcular{/if}
+      {#if loading}Calculando…{:else if calculated}Calculado{:else}Calcular{/if}
     </button>
   </div>
 
@@ -180,13 +215,17 @@ async function fetchData() {
       {:else if errorMsg}
         <div class="alert alert-error">{errorMsg}</div>
       {:else}
+        <div class="flex justify-end mb-2">
+          <CopyTableButton tableId="no-contable-table" />
+        </div>
         <div class="overflow-x-auto">
-          <table class="table table-sm">
+          <table id="no-contable-table" class="table table-sm">
             <thead>
               <tr>
                 <th>Fecha</th>
                 <th>Monto</th>
                 <th>Documento</th>
+                <th>SICOM</th>
               </tr>
             </thead>
             <tbody>
@@ -195,10 +234,11 @@ async function fetchData() {
                   <td>{r.fecha}</td>
                   <td>{fmtMoney(r.monto)}</td>
                   <td class="max-w-[520px] truncate" title={r.documento}>{r.documento}</td>
+                  <td class="max-w-[420px] truncate" title={sicomSummary(r)}>{sicomSummary(r)}</td>
                 </tr>
               {/each}
               {#if !rows.length}
-                <tr><td colspan="3" class="opacity-60">Sin registros</td></tr>
+                <tr><td colspan="4" class="opacity-60">Sin registros</td></tr>
               {/if}
             </tbody>
           </table>
@@ -209,7 +249,7 @@ async function fetchData() {
         <button
           class="btn btn-xs btn-outline"
           on:click|preventDefault={fetchData}
-          disabled={loading}
+          disabled={loading || calculated}
           aria-busy={loading}
         >
           {#if loading}Actualizando…{:else}Refrescar{/if}

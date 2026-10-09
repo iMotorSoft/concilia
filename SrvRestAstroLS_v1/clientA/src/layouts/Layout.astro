@@ -12,26 +12,17 @@ interface Props {
 const {
   title,
   theme_daisyui,
-  metaDescription = "Descubre el universo interior de la mística judía con tutor AI. Curso online basado en Aryeh Kaplan. ¡Certificado incluido!",
+  metaDescription = "Concilia FCE: herramienta de conciliación bancaria y contable.",
   canonicalUrl
 } = Astro.props;
 
-// Construimos el JSON-LD como objeto JS y luego lo serializamos:
-const courseJsonLd = {
+const appJsonLd = {
   "@context": "https://schema.org",
-  "@type": "Course",
-  "name": "Mística Judía: Universo Interior",
+  "@type": "SoftwareApplication",
+  "name": "Concilia FCE",
   "description": metaDescription,
-  "provider": {
-    "@type": "Organization",
-    "name": "JudaismoEnVivo",
-    "sameAs": "https://judaismoenvivo.com"
-  },
-  "offers": {
-    "@type": "Offer",
-    "price": "79",
-    "priceCurrency": "USD"
-  }
+  "applicationCategory": "FinanceApplication",
+  "operatingSystem": "Web"
 };
 
 const pageUrl = canonicalUrl ?? Astro.url.href;
@@ -43,7 +34,7 @@ const pageUrl = canonicalUrl ?? Astro.url.href;
     <!-- Básico -->
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>{title} | JudaismoEnVivo</title>
+    <title>{title} | Concilia FCE</title>
     <meta name="description" content={metaDescription} />
 
     <!-- Canonical -->
@@ -60,7 +51,7 @@ const pageUrl = canonicalUrl ?? Astro.url.href;
     <meta property="og:description" content={metaDescription} />
     <meta property="og:type" content="website" />
     <meta property="og:url" content={pageUrl} />
-    <meta property="og:image" content="https://judaismoenvivo.com/assets/universo-interior-social.jpg" />
+    <meta property="og:image" content="/assets/concilia-fce.png" />
     <meta property="og:locale" content="es_ES" />
 
     <!-- Twitter -->
@@ -68,55 +59,14 @@ const pageUrl = canonicalUrl ?? Astro.url.href;
     <meta name="twitter:title" content={title} />
     <meta name="twitter:description" content={metaDescription} />
 
-    <!-- Google Ads / Analytics -->
-    <script async src="https://www.googletagmanager.com/gtag/js?id=AW-123456789"></script>
-    <script is:inline>
-      window.dataLayer = window.dataLayer || [];
-      function gtag(){ dataLayer.push(arguments); }
-      gtag('js', new Date());
-      gtag('config', 'AW-123456789');  // Ads
-      gtag('config', 'G-G7844VZX8S');  // Analytics
-    </script>
-
-    <!-- Meta Pixel -->
-    <script is:inline>
-      !function(f,b,e,v,n,t,s){
-        if(f.fbq)return;n=f.fbq=function(){n.callMethod?
-        n.callMethod.apply(n,arguments):n.queue.push(arguments)};
-        if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';
-        n.queue=[];t=b.createElement(e);t.async=!0;t.src=v;
-        s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)
-      }(window,document,'script','https://connect.facebook.net/en_US/fbevents.js');
-      fbq('init', '1367865940959690');
-      fbq('track', 'PageView');
-      fbq('trackCustom', 'ViewCourse', {
-        course_name: 'Universo Interior',
-        content_type: 'product'
-      });
-    </script>
-    <noscript>
-      <img height="1" width="1" style="display:none"
-           src="https://www.facebook.com/tr?id=1367865940959690&ev=PageView&noscript=1"/>
-    </noscript>
-
     <!-- Schema.org JSON-LD -->
     <script type="application/ld+json">
-      {JSON.stringify(courseJsonLd)}
+      {JSON.stringify(appJsonLd)}
     </script>
   </head>
 
   <body class="min-h-screen bg-base-100 text-base-content">
     <slot />
-
-    <!-- Ejemplo de evento Ads en page_view -->
-    <script is:inline>
-      if (typeof gtag === 'function') {
-        gtag('event', 'page_view', {
-          send_to: 'AW-123456789',
-          ecomm_pagetype: 'course'
-        });
-      }
-    </script>
   </body>
 </html>
 
@@ -138,4 +88,3 @@ const pageUrl = canonicalUrl ?? Astro.url.href;
     --pc: 0 0% 100%;
   }
 </style>
-

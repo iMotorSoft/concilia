@@ -1,5 +1,7 @@
 <script lang="ts">
+  import { authFetch as fetch } from '../../auth/transport.js';
   import { daysWindowStore, DEFAULT_DAYS_WINDOW, normalizeDaysWindow } from '../reconcileConfig';
+  import CopyTableButton from '../CopyTableButton.svelte';
 
   type PairRow = {
     fecha_banco?: string;
@@ -8,19 +10,34 @@
     documento_banco?: string;
     documento_pilaga?: string;
     date_diff_days?: number;
+    sicom_bank?: {
+      match_count?: number;
+      lot_matches?: { banco_raw?: string; nro_pago?: string; op_count?: number }[];
+    } | null;
+    sicom_pilaga?: {
+      op_key?: string;
+      exact_match_count?: number;
+      exact_matches?: { banco_raw?: string; nro_pago?: string }[];
+    } | null;
   };
 
   const props = $props<{
     urlRest: string;
     extractoUri: string;
     contableUri: string;
+    sicomUri?: string;
+    bankScope?: string;
+    accountScope?: string;
   }>();
 
   const urlRest = $derived(props.urlRest || "");
   const extractoUri = $derived(props.extractoUri || "");
   const contableUri = $derived(props.contableUri || "");
+  const sicomUri = $derived(props.sicomUri || "");
+  const bankScope = $derived(props.bankScope || "");
+  const accountScope = $derived(props.accountScope || "");
 
-  const TITLE = "Conciliados 1→1";
+  const TITLE = "Coincidencias directas 1→1";
   const ENDPOINT = "/api/reconcile/details/pares";
 
   let expanded = $state(false);
@@ -33,6 +50,7 @@ let daysWindow = $state(DEFAULT_DAYS_WINDOW);
 let lastSourceFingerprint: string | null = null;
 let elapsedMs = $state(0);
 let timerId: any = null;
+let calculated = $state(false);
 
   function fmtMoney(value: number | string | null | undefined) {
     if (value === null || value === undefined) return "—";
@@ -56,6 +74,7 @@ let timerId: any = null;
 function resetState() {
   expanded = false;
   loading = false;
+  calculated = false;
   errorMsg = null;
   rows = [];
   countDisplay = null;
@@ -77,11 +96,32 @@ function resetState() {
   $effect(() => {
     const extr = extractoUri || "";
     const cont = contableUri || "";
-    const fingerprint = `${extr}|${cont}`;
+    const sic = sicomUri || "";
+    const fingerprint = `${extr}|${cont}|${sic}|${bankScope}|${accountScope}`;
     if (fingerprint === lastSourceFingerprint) return;
     lastSourceFingerprint = fingerprint;
     resetState();
   });
+
+  function bankSicomLabel(row: PairRow): string {
+    const lot = row?.sicom_bank?.lot_matches?.[0];
+    if (!lot) return "—";
+    return `${lot?.banco_raw || "SICOM"} · lote ${lot?.nro_pago || "—"}`;
+  }
+
+  function pilagaSicomLabel(row: PairRow): string {
+    const op = row?.sicom_pilaga;
+    const first = op?.exact_matches?.[0];
+    if (first) return `${op?.op_key || "OP"} · lote ${first?.nro_pago || "—"}`;
+    if (op?.op_key) return `${op.op_key} · sin exacto`;
+    return "—";
+  }
+
+  function extractOpKey(value?: string | null): string {
+    const txt = String(value || "").toUpperCase();
+    const match = txt.match(/(\d+\/\d{4})/);
+    return match?.[1] || "—";
+  }
 
   async function toggleExpanded() {
     expanded = !expanded;
@@ -92,6 +132,7 @@ async function fetchData() {
     errorMsg = "Faltan archivos confirmados.";
     return;
   }
+  if (calculated) return;
   expanded = true; // mostrar mientras calcula
   loading = true;
   elapsedMs = 0;
@@ -105,6 +146,9 @@ async function fetchData() {
       const fd = new FormData();
       fd.set("uri_extracto", extractoUri || "");
       fd.set("uri_contable", contableUri || "");
+      fd.set("uri_sicom", sicomUri || "");
+      fd.set("bank_scope", bankScope || "");
+      fd.set("account_scope", accountScope || "");
       fd.set("days_window", String(daysWindow ?? DEFAULT_DAYS_WINDOW));
 
       const res = await fetch(`${urlRest}${ENDPOINT}`, { method: "POST", body: fd });
@@ -118,6 +162,7 @@ async function fetchData() {
       const providedTotal = typeof payload.total_amount === "number" ? payload.total_amount : null;
       const inferredTotal = rows.reduce((acc, r) => acc + (Number(r?.monto) || 0), 0);
       totalAmount = providedTotal ?? inferredTotal;
+      calculated = true;
   } catch (err: any) {
     errorMsg = err?.message || "No se pudo cargar el detalle.";
     rows = [];
@@ -162,10 +207,10 @@ async function fetchData() {
     <button
       class="btn btn-primary btn-xs"
       on:click|preventDefault|stopPropagation={fetchData}
-      disabled={loading}
+      disabled={loading || calculated}
       aria-busy={loading}
     >
-      {#if loading}Calculando…{:else}Calcular{/if}
+      {#if loading}Calculando…{:else if calculated}Calculado{:else}Calcular{/if}
     </button>
   </div>
 
@@ -179,15 +224,21 @@ async function fetchData() {
       {:else if errorMsg}
         <div class="alert alert-error">{errorMsg}</div>
       {:else}
+        <div class="flex justify-end mb-2">
+          <CopyTableButton tableId="conciliados-uno-a-uno-table" />
+        </div>
         <div class="overflow-x-auto">
-          <table class="table table-sm">
+          <table id="conciliados-uno-a-uno-table" class="table table-sm">
             <thead>
               <tr>
                 <th>Fecha banco</th>
                 <th>Monto</th>
                 <th>Doc. banco</th>
+                <th>Lote SICOM</th>
                 <th>Fecha PILAGA</th>
+                <th>OP</th>
                 <th>Doc. PILAGA</th>
+                <th>OP SICOM</th>
                 <th>Δ días</th>
               </tr>
             </thead>
@@ -197,11 +248,17 @@ async function fetchData() {
                   <td>{r?.fecha_banco ?? "—"}</td>
                   <td>{fmtMoney(r?.monto)}</td>
                   <td class="max-w-[240px] truncate" title={r?.documento_banco}>{r?.documento_banco ?? "—"}</td>
+                  <td class="max-w-[220px] truncate" title={bankSicomLabel(r)}>{bankSicomLabel(r)}</td>
                   <td>{r?.fecha_pilaga ?? "—"}</td>
+                  <td>{extractOpKey(r?.documento_pilaga)}</td>
                   <td class="max-w-[240px] truncate" title={r?.documento_pilaga}>{r?.documento_pilaga ?? "—"}</td>
+                  <td class="max-w-[220px] truncate" title={pilagaSicomLabel(r)}>{pilagaSicomLabel(r)}</td>
                   <td>{r?.date_diff_days ?? 0}</td>
                 </tr>
               {/each}
+              {#if !rows.length}
+                <tr><td colspan="9" class="opacity-60">Sin registros</td></tr>
+              {/if}
             </tbody>
           </table>
         </div>

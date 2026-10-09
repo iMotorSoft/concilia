@@ -1,13 +1,13 @@
 // Place any global data in this file.
 // You can import this data from anywhere in your site by using the `import` keyword.
 
-export const SITE_TITLE = 'Astrofy | Personal Portfolio Website Template';
-export const SITE_DESCRIPTION = 'Astrofy is a free and open-source template for your Personal Portfolio Website built with Astro and TailwindCSS. Create in minutes a website with Blog, CV, Project Section, Store and RSS Feed.';
+export const SITE_TITLE = 'Concilia FCE';
+export const SITE_DESCRIPTION = 'Herramienta de conciliación bancaria y contable.';
 
 export const URL = '/clientA/dist/workspace/index.html'
 
-const URL_REST_DEV = 'http://localhost:7058' // 'http://localhost:7018  https://judaismoenvivo.com
-const URL_REST_PRO = 'https://fce.concilia.imotorsoft.com' // 'http://localhost:7018  https://judaismoenvivo.com
+const URL_REST_DEV = `http://${typeof window !== 'undefined' && window.location.hostname === '127.0.0.1' ? '127.0.0.1' : 'localhost'}:7058`
+const URL_REST_PRO = 'https://fce.concilia.imotorsoft.com'
 
 const isLocalhost = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
 export const URL_REST = (import.meta.env.DEV || isLocalhost) ? URL_REST_DEV : URL_REST_PRO

@@ -1,6 +1,6 @@
 ---
 import Layout from '../layouts/Layout.astro';
-import ReconciliarApp from "../components/agui/ReconciliarApp.svelte";
+import AuthenticatedConcilia from "../components/auth/AuthenticatedConcilia.svelte";
 
 const canonicalHref = new URL(Astro.url.pathname, Astro.site).href;
 ---
@@ -13,6 +13,6 @@ const canonicalHref = new URL(Astro.url.pathname, Astro.site).href;
     <p class="text-sm opacity-70">
       Nueva ruta de trabajo seguro. Inicialmente reusa el flujo actual y luego lo vamos diferenciando.
     </p>
-    <ReconciliarApp client:load />
+    <AuthenticatedConcilia client:load />
   </div>
 </Layout>

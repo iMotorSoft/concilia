@@ -1,8 +1,16 @@
 <script lang="ts">
 // src/components/agui/ReconciliarApp.svelte
 import { URL_REST } from '../global';
+import { authFetch as fetch } from '../auth/transport.js';
+import { onDestroy } from 'svelte';
+onDestroy(() => {
+  es?.close(); wizardSse?.close(); wizardNotifySse?.close();
+  if (toastTimer) clearTimeout(toastTimer);
+});
+let { role = 'CONSULTA' } = $props<{ role?: string }>();
 import ReconciliarResumen from "../agui/ReconciliarResumen.svelte";
 import ReconciliarDetalle from '../agui/ReconciliarDetalle.svelte';
+import CopyTableButton from './CopyTableButton.svelte';
 import { get } from 'svelte/store';
 import { daysWindowStore, DEFAULT_DAYS_WINDOW, normalizeDaysWindow } from './reconcileConfig';
 
@@ -23,6 +31,7 @@ let fileInputRef: HTMLInputElement | null = null;
 // Dos previews independientes
 let previewExtracto: any = $state(null);
 let previewContable: any = $state(null);
+let previewSicom: any = $state(null);
 
 // Conciliación
 let reconciling = $state(false);
@@ -50,7 +59,6 @@ let wizardConfirm: any = $state(null);
 let wizardScopeMode = $state("ALL");
 let wizardWindowFrom = $state("");
 let wizardWindowTo = $state("");
-let wizardWindowDays = $state(DEFAULT_DAYS_WINDOW);
 let wizardMonths: string[] = $state([]);
 let wizardBusy = $state(false);
 let wizardInitializing = $state(false);
@@ -65,6 +73,7 @@ let toastTimer: any = null;
 
 let confirmBusyExtracto = $state(false);
 let confirmBusyContable = $state(false);
+let confirmBusySicom = $state(false);
 
 const threadId = crypto?.randomUUID?.() ?? `t-reconciliar-${Date.now()}`;
 
@@ -73,18 +82,6 @@ function showToast(level: "info"|"success"|"warning"|"error", message: string) {
   if (toastTimer) clearTimeout(toastTimer);
   toastTimer = setTimeout(() => (toast = null), 2600);
 }
-
-$effect(() => {
-  if (!dialogRef) return;
-  if (dialogOpen && !dialogRef.open) dialogRef.showModal?.();
-  if (!dialogOpen && dialogRef.open) dialogRef.close?.();
-});
-
-$effect(() => {
-  if (!wizardDialogRef) return;
-  if (wizardOpen && !wizardDialogRef.open) wizardDialogRef.showModal?.();
-  if (!wizardOpen && wizardDialogRef.open) wizardDialogRef.close?.();
-});
 
 function seedFormDefaults(spec: any) {
   const d: Record<string, any> = {};
@@ -142,9 +139,48 @@ function daysLabel(value: any) {
   return ` (${Math.round(days)} dias)`;
 }
 
+function formatMoney(value: any) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "—";
+  return new Intl.NumberFormat("es-AR", {
+    style: "currency",
+    currency: "ARS",
+    maximumFractionDigits: 2,
+  }).format(num);
+}
+
+function cleanText(value: any) {
+  const text = String(value ?? "").trim();
+  return text || "";
+}
+
+function monthStatusLabel(status: any) {
+  const text = cleanText(status).toLowerCase();
+  if (text === "ok") return "Completo";
+  if (text === "partial") return "Parcial";
+  if (text === "missing") return "Faltante";
+  return cleanText(status) || "Disponible";
+}
+
+function monthStatusClass(status: any) {
+  const text = cleanText(status).toLowerCase();
+  if (text === "ok") return "badge-success";
+  if (text === "partial") return "badge-warning";
+  if (text === "missing") return "badge-error";
+  return "badge-outline";
+}
+
+function wizardConfirmMessage() {
+  const message = cleanText(wizardConfirm?.message);
+  if (message.toLowerCase().includes("meses parciales")) {
+    return "El alcance seleccionado incluye meses parciales. Puede quedar movimiento fuera del analisis si el periodo no esta completo.";
+  }
+  return message || "Revisa la seleccion antes de continuar.";
+}
+
 function connectSSE() {
   if (es) es.close();
-  es = new EventSource(`${URL_REST}/api/ag-ui/notify/stream?threadId=${encodeURIComponent(threadId)}`);
+  es = new EventSource(`${URL_REST}/api/ag-ui/notify/stream?threadId=${encodeURIComponent(threadId)}`, { withCredentials: true });
   es.onmessage = (ev) => {
     try { handle(JSON.parse(ev.data)); } catch {}
   };
@@ -161,7 +197,8 @@ function connectWizardNotifySSE(targetThreadId: string) {
   if (wizardNotifySse) wizardNotifySse.close();
   wizardNotifyThreadId = targetThreadId;
   wizardNotifySse = new EventSource(
-    `${URL_REST}/api/ag-ui/notify/stream?threadId=${encodeURIComponent(targetThreadId)}`
+    `${URL_REST}/api/ag-ui/notify/stream?threadId=${encodeURIComponent(targetThreadId)}`,
+    { withCredentials: true }
   );
   wizardNotifySse.onmessage = (ev) => {
     try { handle(JSON.parse(ev.data)); } catch {}
@@ -174,7 +211,7 @@ function connectWizardSSE(runId: string, sseUrl?: string | null) {
   const url = sseUrl
     ? (sseUrl.startsWith("http") ? sseUrl : `${URL_REST}${sseUrl}`)
     : `${URL_REST}/api/reconcile_wizard/runs/${runId}/events`;
-  wizardSse = new EventSource(url);
+  wizardSse = new EventSource(url, { withCredentials: true });
   wizardSse.onopen = () => {
     wizardError = null;
   };
@@ -187,6 +224,29 @@ function connectWizardSSE(runId: string, sseUrl?: string | null) {
     wizardError = "No se pudo conectar con los eventos del asistente.";
     showToast("error", "Conexión SSE del wizard caída.");
   };
+}
+
+function uploadFormSpec(role: "extracto"|"contable"|"sicom") {
+  const accept = role === "extracto" ? ".xlsx,.xls,.csv" : ".xlsx,.xls";
+  return {
+    title: "Subí el archivo para analizar",
+    hint: "Acepta .xlsx, .xls, .csv",
+    fields: [
+      { name: "file", label: "Archivo", type: "file", accept, required: true },
+    ],
+    submit: {
+      endpoint: `/api/uploads/v2/ingest?role=${role}`,
+      method: "POST",
+      label: "Subir y analizar",
+    },
+  };
+}
+
+function openUploadDialog(role: "extracto"|"contable"|"sicom") {
+  connectSSE();
+  formSpec = uploadFormSpec(role);
+  seedFormDefaults(formSpec);
+  dialogOpen = true;
 }
 
 function wizardStepIndex() {
@@ -215,6 +275,7 @@ function handle(msg: any) {
     const kind = (payload.kind || "").toLowerCase();
     const role = (payload.role || "").toLowerCase();
     const resolvedRole =
+      kind === "sicom" ? "sicom" :
       kind === "gl" ? "contable" :
       kind === "bank_movements" ? "extracto" :
       role || "";
@@ -223,6 +284,8 @@ function handle(msg: any) {
       previewExtracto = payload;
     } else if (resolvedRole === "contable") {
       previewContable = payload;
+    } else if (resolvedRole === "sicom") {
+      previewSicom = payload;
     } else {
       previewExtracto = payload; // fallback
     }
@@ -241,6 +304,9 @@ function handle(msg: any) {
     } else if (role === "contable" && previewContable) {
       previewContable = { ...(previewContable || {}), canonical_uri };
       showToast("info", "Canónico listo (contable).");
+    } else if (role === "sicom" && previewSicom) {
+      previewSicom = { ...(previewSicom || {}), ...payload };
+      showToast("info", "Canónico listo (SICOM).");
     }
     return;
   }
@@ -292,9 +358,6 @@ function handleWizard(msg: any) {
     const windowRange = selection.window_range || {};
     if (windowRange.from) wizardWindowFrom = windowRange.from;
     if (windowRange.to) wizardWindowTo = windowRange.to;
-    const windowDays = normalizeDaysWindow(selection.window_days ?? DEFAULT_DAYS_WINDOW);
-    wizardWindowDays = windowDays;
-    daysWindowStore.set(windowDays);
     const previewRange = wizardState?.context?.preview?.range || [];
     if (!wizardWindowFrom && previewRange[0]) wizardWindowFrom = previewRange[0];
     if (!wizardWindowTo && previewRange[1]) wizardWindowTo = previewRange[1];
@@ -335,7 +398,14 @@ function handleWizard(msg: any) {
   }
 
   if (t === "LIST_SNAPSHOT") {
-    wizardListItems = payload?.items || [];
+    const items = payload?.items || [];
+    wizardListItems = items;
+    const selectableMonths = items
+      .filter((item: any) => item?.month && item?.selectable !== false)
+      .map((item: any) => item.month);
+    if (!wizardMonths.length && selectableMonths.length === 1) {
+      wizardMonths = [selectableMonths[0]];
+    }
     return;
   }
 
@@ -357,6 +427,7 @@ function handleWizard(msg: any) {
 async function onSendText(customText?: string) {
   const text = ((customText ?? chatInput) || "").trim();
   if (!text || sending) return;
+  connectSSE();
   // Sincroniza el textarea cuando se usan accesos rápidos
   chatInput = text;
   sending = true;
@@ -414,12 +485,16 @@ async function onSubmitUpload() {
 }
 
 // ===== Confirmación por card =====
-async function onConfirmPreview(role: "extracto"|"contable") {
-  const p = role === "extracto" ? previewExtracto : previewContable;
+async function onConfirmPreview(role: "extracto"|"contable"|"sicom") {
+  const p =
+    role === "extracto" ? previewExtracto :
+    role === "contable" ? previewContable :
+    previewSicom;
   if (!p) return;
 
   if (role === "extracto") confirmBusyExtracto = true;
-  else confirmBusyContable = true;
+  else if (role === "contable") confirmBusyContable = true;
+  else confirmBusySicom = true;
 
   try {
     const fd = new FormData();
@@ -440,14 +515,17 @@ async function onConfirmPreview(role: "extracto"|"contable") {
     // Marcar card como confirmada para ocultar el botón
     if (role === "extracto") {
       previewExtracto = { ...(previewExtracto || {}), confirmed: true };
-    } else {
+    } else if (role === "contable") {
       previewContable = { ...(previewContable || {}), confirmed: true };
+    } else {
+      previewSicom = { ...(previewSicom || {}), confirmed: true };
     }
   } catch {
     showToast("error", `No se pudo confirmar (${role}).`);
   } finally {
     if (role === "extracto") confirmBusyExtracto = false;
-    else confirmBusyContable = false;
+    else if (role === "contable") confirmBusyContable = false;
+    else confirmBusySicom = false;
   }
 }
 
@@ -466,6 +544,16 @@ async function startReconcileDirect() {
   fd.set("threadId", threadId);
   fd.set("uri_extracto", previewExtracto.canonical_uri || previewExtracto.original_uri || "");
   fd.set("uri_contable", previewContable.canonical_uri || previewContable.original_uri || "");
+  fd.set("uri_sicom", previewSicom?.canonical_uri || previewSicom?.original_uri || "");
+  fd.set("bank_scope", previewExtracto?.detected?.bank || previewContable?.detected?.bank || "");
+  fd.set(
+    "account_scope",
+    previewExtracto?.detected?.account_full ||
+      previewExtracto?.detected?.account_core_dv ||
+      previewContable?.detected?.account_full ||
+      previewContable?.detected?.account_core_dv ||
+      ""
+  );
   fd.set("days_window", String(currentDaysWindow));
 
   try {
@@ -530,7 +618,6 @@ async function startWizard() {
   wizardMonths = [];
   wizardWindowFrom = "";
   wizardWindowTo = "";
-  wizardWindowDays = normalizeDaysWindow(get(daysWindowStore) ?? DEFAULT_DAYS_WINDOW);
   const detectedBank = resolveWizardBank();
   const detectedAccount = resolveWizardAccount();
   const datasetRef = resolveWizardDatasetRef();
@@ -619,16 +706,7 @@ function toggleMonth(month: string) {
   }
 }
 
-async function applyWizardWindowDays() {
-  const normalized = normalizeDaysWindow(wizardWindowDays);
-  wizardWindowDays = normalized;
-  daysWindowStore.set(normalized);
-  if (!wizardRunId || wizardStatus !== "ready") return;
-  await sendWizardAction("SELECT_WINDOW_DAYS", { window_days: normalized });
-}
-
 async function onWizardScopeNext() {
-  await applyWizardWindowDays();
   const modeApi = (wizardScopeMode === "ALL")
     ? "ALL_RANGE"
     : (wizardScopeMode === "RANGE" ? "WINDOW" : wizardScopeMode);
@@ -672,17 +750,12 @@ async function onWizardConfirmSelection() {
 
 async function onWizardConfirmStart() {
   if (reconciling) return;
-  await applyWizardWindowDays();
   await sendWizardAction("CONFIRM_START", { kind: "start" });
   wizardOpen = false;
   showToast("info", "Configuración enviada. Iniciando conciliación...");
   await startReconcileDirect();
 }
 
-$effect(() => {
-  if (typeof window === "undefined") return;
-  connectSSE();
-});
 </script>
 
 <!-- Chat -->
@@ -695,25 +768,29 @@ $effect(() => {
 
     <div class="flex flex-col gap-2">
       <div class="flex gap-2">
-        <button class="btn btn-active btn-primary btn-xs" on:click|preventDefault={() => onSendText("subir extracto")}>
+        <button class="btn btn-active btn-primary btn-xs" disabled={role === 'CONSULTA'} on:click|preventDefault={() => openUploadDialog("extracto")}>
           Subir extracto
         </button>
-        <button class="btn btn-active btn-primary btn-xs" on:click|preventDefault={() => onSendText("subir contable")}>
+        <button class="btn btn-active btn-primary btn-xs" disabled={role === 'CONSULTA'} on:click|preventDefault={() => openUploadDialog("contable")}>
           Subir contable
+        </button>
+        <button class="btn btn-active btn-primary btn-xs" disabled={role === 'CONSULTA'} on:click|preventDefault={() => openUploadDialog("sicom")}>
+          Subir SICOM
         </button>
       </div>
       <textarea
         class="textarea textarea-bordered w-full"
         bind:value={chatInput}
-        placeholder="Escribí: 'subir extracto' o 'subir contable' (Ctrl/Cmd + Enter)"
+        disabled={role === 'CONSULTA'}
+        placeholder="Escribí: 'subir extracto', 'subir contable' o 'subir sicom' (Ctrl/Cmd + Enter)"
         rows="3"
         spellcheck="false"
         on:keydown={onKeydownChat}
-      />
+      ></textarea>
       <div class="flex justify-end">
-        <button class="btn btn-primary" on:click|preventDefault={onSendText} disabled={sending} aria-busy={sending}>
+        <button class="btn btn-primary" on:click|preventDefault={onSendText} disabled={role === 'CONSULTA' || sending} aria-busy={sending}>
           {#if sending}
-            <span class="loading loading-spinner loading-sm mr-2" /> Procesando…
+            <span class="loading loading-spinner loading-sm mr-2"></span> Procesando…
           {:else}
             Enviar
           {/if}
@@ -724,7 +801,7 @@ $effect(() => {
 </section>
 
 <!-- Modal de Upload -->
-<dialog class="modal" bind:this={dialogRef} on:close={() => (dialogOpen = false)}>
+<dialog class="modal" open={dialogOpen} bind:this={dialogRef} on:close={() => (dialogOpen = false)}>
   <div class="modal-box max-w-3xl">
     <h3 class="font-bold text-lg">{formSpec?.title || "Subí el archivo para analizar"}</h3>
     {#if formSpec?.hint}<p class="opacity-70 text-sm mb-2">{formSpec.hint}</p>{/if}
@@ -734,7 +811,7 @@ $effect(() => {
       <input
         class="file-input file-input-bordered w-full"
         type="file"
-        multiple
+        multiple={!((formSpec?.submit?.endpoint || "").includes("role=sicom"))}
         accept={formSpec?.fields?.[0]?.accept || ".xlsx,.xls,.csv"}
         on:change={(e:any)=>{fileObjs = Array.from(e?.target?.files || []);}}
         bind:this={fileInputRef}
@@ -745,7 +822,7 @@ $effect(() => {
     <div class="modal-action">
       <button class="btn btn-primary" on:click|preventDefault={onSubmitUpload} disabled={uploadBusy} aria-busy={uploadBusy}>
         {#if uploadBusy}
-          <span class="loading loading-spinner loading-sm mr-2" />
+          <span class="loading loading-spinner loading-sm mr-2"></span>
         {/if}
         {formSpec?.submit?.label || "Subir y analizar"}
       </button>
@@ -757,7 +834,7 @@ $effect(() => {
 </dialog>
 
 <!-- Modal Wizard -->
-<dialog class="modal" bind:this={wizardDialogRef} on:close={() => (wizardOpen = false)}>
+<dialog class="modal" open={wizardOpen} bind:this={wizardDialogRef} on:close={() => (wizardOpen = false)}>
   <div class="modal-box max-w-3xl">
     <div class="flex items-center justify-between gap-2">
       <h3 class="font-bold text-lg">Asistente de Conciliación</h3>
@@ -765,11 +842,6 @@ $effect(() => {
     </div>
     {#if wizardStepTitle}
       <p class="text-sm opacity-70 mt-1">{wizardStepTitle}</p>
-    {/if}
-    {#if wizardEvents.length}
-      <p class="text-xs opacity-60 mt-1">
-        Último evento: {wizardEvents[wizardEvents.length - 1]?.type || "—"}
-      </p>
     {/if}
     {#if wizardStatus === "error" && wizardError}
       <div class="alert alert-error text-sm mt-3">
@@ -805,24 +877,34 @@ $effect(() => {
       {#if wizardState?.context?.preview}
         {@const preview = wizardState.context.preview}
         {@const windowMax = preview.window_max}
-        <div class="mt-4 text-sm space-y-2">
-          <div>
-            <span class="font-semibold">Ventana maxima detectada:</span>
-            {#if windowMax?.range?.[0] && windowMax?.range?.[1]}
-              {windowMax.range[0]} → {windowMax.range[1]}{daysLabel(windowMax.days)}
-            {:else}
-              <span class="opacity-60">N/A</span>
-            {/if}
+        <div class="mt-4 rounded-md border border-base-300 bg-base-200/40 p-3 text-sm space-y-3">
+          <div class="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+            <span class="font-semibold">Ventana máxima detectada</span>
+            <span class="font-mono text-xs">
+              {#if windowMax?.range?.[0] && windowMax?.range?.[1]}
+                {windowMax.range[0]} → {windowMax.range[1]}{daysLabel(windowMax.days)}
+              {:else}
+                N/A
+              {/if}
+            </span>
           </div>
           {#if windowMax?.pair}
-            <div class="text-xs opacity-70 space-y-1">
-              <div>
-                <span class="font-semibold">Extracto:</span>
-                {windowMax.pair.extracto?.fecha || "—"}, doc {windowMax.pair.extracto?.documento || "—"}, monto {windowMax.pair.extracto?.monto ?? "—"}
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
+              <div class="rounded-md border border-base-300 bg-base-100 p-2">
+                <div class="font-semibold">Extracto</div>
+                <div class="mt-1">{windowMax.pair.extracto?.fecha || "—"}</div>
+                {#if cleanText(windowMax.pair.extracto?.documento)}
+                  <div class="opacity-70">Doc: {cleanText(windowMax.pair.extracto.documento)}</div>
+                {/if}
+                <div class="font-medium">{formatMoney(windowMax.pair.extracto?.monto)}</div>
               </div>
-              <div>
-                <span class="font-semibold">Contable:</span>
-                {windowMax.pair.contable?.fecha || "—"}, doc {windowMax.pair.contable?.documento || "—"}, monto {windowMax.pair.contable?.monto ?? "—"}
+              <div class="rounded-md border border-base-300 bg-base-100 p-2">
+                <div class="font-semibold">Contable</div>
+                <div class="mt-1">{windowMax.pair.contable?.fecha || "—"}</div>
+                {#if cleanText(windowMax.pair.contable?.documento)}
+                  <div class="opacity-70">Doc: {cleanText(windowMax.pair.contable.documento)}</div>
+                {/if}
+                <div class="font-medium">{formatMoney(windowMax.pair.contable?.monto)}</div>
               </div>
             </div>
           {/if}
@@ -853,22 +935,6 @@ $effect(() => {
         </div>
       {/if}
 
-      <div class="mt-4 text-sm">
-        <label class="flex items-center gap-3">
-          <span class="font-semibold">Ventana maxima (dias)</span>
-          <input
-            class="input input-bordered input-sm w-24"
-            type="number"
-            min="1"
-            max="365"
-            bind:value={wizardWindowDays}
-            on:change={applyWizardWindowDays}
-            disabled={wizardBusy || !wizardRunId || wizardStatus !== "ready"}
-          />
-        </label>
-        <p class="text-xs opacity-60 mt-1">Define la diferencia maxima en dias entre extracto y contable.</p>
-      </div>
-
       {#if wizardAlerts.length}
         <div class="alert alert-warning text-sm mt-3">
           <div>
@@ -884,16 +950,21 @@ $effect(() => {
 
       {#if wizardConfirm}
         <div class="alert alert-warning text-sm mt-3">
-          <div>
-            <span class="font-semibold">Confirmación requerida.</span>
-            <div>{wizardConfirm?.message || "Confirmá para continuar."}</div>
-            <button
-              class="btn btn-sm btn-warning btn-outline bg-base-100 mt-2"
-              on:click|preventDefault={onWizardConfirmSelection}
-              disabled={wizardBusy || !wizardRunId || wizardStatus !== "ready" || !wizardState}
-            >
-              Confirmar selección
-            </button>
+          <div class="flex flex-col gap-2 w-full">
+            <span class="font-semibold">Revisá el alcance antes de continuar</span>
+            <div>{wizardConfirmMessage()}</div>
+            <div class="flex flex-wrap gap-2">
+              <button
+                class="btn btn-sm btn-warning"
+                on:click|preventDefault={onWizardConfirmSelection}
+                disabled={wizardBusy || !wizardRunId || wizardStatus !== "ready" || !wizardState}
+              >
+                Continuar igual
+              </button>
+              <button class="btn btn-sm btn-ghost" on:click|preventDefault={() => (wizardConfirm = null)}>
+                Ajustar alcance
+              </button>
+            </div>
           </div>
         </div>
       {/if}
@@ -934,15 +1005,15 @@ $effect(() => {
             <p class="text-sm opacity-70">Cargando meses…</p>
           {:else}
             {#each wizardListItems as item}
-              <label class="flex items-center gap-2 text-sm">
+              <label class="flex items-center gap-2 rounded-md border border-base-300 p-2 text-sm">
                 <input
                   type="checkbox"
                   disabled={!item.selectable}
                   checked={wizardMonths.includes(item.month)}
                   on:change={() => toggleMonth(item.month)}
                 />
-                <span>{item.month}</span>
-                <span class="badge badge-outline">{item.status}</span>
+                <span class="font-medium">{item.month}</span>
+                <span class={`badge ${monthStatusClass(item.status)}`}>{monthStatusLabel(item.status)}</span>
                 {#if item.status === "partial" && (item.missing_days || []).length}
                   <span class="opacity-60">faltan {item.missing_days.length} dias</span>
                 {/if}
@@ -968,16 +1039,21 @@ $effect(() => {
 
       {#if wizardConfirm}
         <div class="alert alert-warning text-sm mt-3">
-          <div>
-            <span class="font-semibold">Confirmación requerida.</span>
-            <div>{wizardConfirm?.message || "Confirmá para continuar."}</div>
-            <button
-              class="btn btn-sm btn-warning btn-outline bg-base-100 mt-2"
-              on:click|preventDefault={onWizardConfirmSelection}
-              disabled={wizardBusy || !wizardRunId || wizardStatus !== "ready" || !wizardState}
-            >
-              Confirmar selección
-            </button>
+          <div class="flex flex-col gap-2 w-full">
+            <span class="font-semibold">Revisá el alcance antes de continuar</span>
+            <div>{wizardConfirmMessage()}</div>
+            <div class="flex flex-wrap gap-2">
+              <button
+                class="btn btn-sm btn-warning"
+                on:click|preventDefault={onWizardConfirmSelection}
+                disabled={wizardBusy || !wizardRunId || wizardStatus !== "ready" || !wizardState}
+              >
+                Continuar igual
+              </button>
+              <button class="btn btn-sm btn-ghost" on:click|preventDefault={() => (wizardConfirm = null)}>
+                Ajustar alcance
+              </button>
+            </div>
           </div>
         </div>
       {/if}
@@ -1007,16 +1083,17 @@ $effect(() => {
           {/if}
         </div>
         <div>
-          <span class="font-semibold">Ventana maxima (dias):</span>
-          {wizardState?.selection?.window_days ?? "N/A"}
-        </div>
-        <div>
           <span class="font-semibold">Rango detectado:</span>
           {wizardState?.context?.preview?.range?.[0]} → {wizardState?.context?.preview?.range?.[1]}
         </div>
         <div>
-          <span class="font-semibold">Archivos:</span>
-          {(wizardState?.context?.preview?.files || []).length}
+          <span class="font-semibold">Extracto:</span>
+          {(wizardState?.context?.preview?.files || []).length || "—"}
+          {#if (wizardState?.context?.preview?.files || []).length === 1}
+            archivo
+          {:else}
+            archivos
+          {/if}
         </div>
       </div>
 
@@ -1187,7 +1264,7 @@ $effect(() => {
       <div class="mt-3 flex gap-2 items-center">
         {#if !previewExtracto?.confirmed}
           <button class="btn btn-primary" on:click|preventDefault={()=>onConfirmPreview("extracto")} disabled={confirmBusyExtracto || (previewExtracto?.validation?.is_valid === false)}>
-            {#if confirmBusyExtracto}<span class="loading loading-spinner loading-sm mr-2" />{:else}Confirmar y procesar{/if}
+            {#if confirmBusyExtracto}<span class="loading loading-spinner loading-sm mr-2"></span>{:else}Confirmar y procesar{/if}
           </button>
         {:else}
           <span class="badge badge-success">Confirmado</span>
@@ -1248,7 +1325,7 @@ $effect(() => {
       <div class="mt-3 flex gap-2 items-center">
         {#if !previewContable?.confirmed}
           <button class="btn btn-primary" on:click|preventDefault={()=>onConfirmPreview("contable")} disabled={confirmBusyContable || (previewContable?.validation?.is_valid === false)}>
-            {#if confirmBusyContable}<span class="loading loading-spinner loading-sm mr-2" />{:else}Confirmar y procesar{/if}
+            {#if confirmBusyContable}<span class="loading loading-spinner loading-sm mr-2"></span>{:else}Confirmar y procesar{/if}
           </button>
         {:else}
           <span class="badge badge-success">Confirmado</span>
@@ -1259,12 +1336,121 @@ $effect(() => {
   </section>
 {/if}
 
+<!-- Card PREVIEW: SICOM -->
+{#if previewSicom}
+  <section class="card bg-base-100 border border-base-300 shadow-sm mt-4">
+    <div class="card-body">
+      <div class="flex items-center gap-2">
+        <h3 class="font-semibold text-lg">Vista previa — SICOM mensual</h3>
+        <span class="badge">sicom</span>
+      </div>
+
+      {#if previewSicom?.validation}
+        {#if previewSicom.validation.is_valid === false}
+          <div class="alert alert-error text-sm mt-2">
+            <div>
+              <span class="font-semibold">El workbook no pasa validación SICOM.</span>
+              {#if (previewSicom.validation.errors || []).length}
+                <ul class="list-disc ml-6">
+                  {#each previewSicom.validation.errors as err}
+                    <li>{err}</li>
+                  {/each}
+                </ul>
+              {/if}
+            </div>
+          </div>
+        {:else}
+          <div class="alert alert-success text-sm mt-2">
+            <div>
+              <span>Workbook SICOM detectado.</span>
+              {#if (previewSicom.validation.warnings || []).length}
+                <ul class="list-disc ml-6">
+                  {#each previewSicom.validation.warnings as warn}
+                    <li>{warn}</li>
+                  {/each}
+                </ul>
+              {/if}
+            </div>
+          </div>
+        {/if}
+      {/if}
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm mt-1">
+        <div><span class="opacity-70">Archivo:</span> <b>{previewSicom?.meta?.filename || "—"}</b></div>
+        <div><span class="opacity-70">Solapas útiles:</span> <b>{previewSicom?.preview?.sheet_count ?? "—"}</b></div>
+        <div><span class="opacity-70">Filas consolidadas:</span> <b>{previewSicom?.preview?.rows ?? "—"}</b></div>
+        <div><span class="opacity-70">Rango real:</span> <b>{previewSicom?.preview?.period_from || "—"} → {previewSicom?.preview?.period_to || "—"}</b></div>
+        <div><span class="opacity-70">Bancos detectados:</span> <b>{previewSicom?.preview?.bank_count ?? 0}</b></div>
+        <div><span class="opacity-70">OP únicas:</span> <b>{previewSicom?.preview?.op_count ?? 0}</b></div>
+        <div><span class="opacity-70">Nro Pago únicos:</span> <b>{previewSicom?.preview?.nro_pago_count ?? 0}</b></div>
+        <div><span class="opacity-70">Columnas requeridas:</span> <b>{previewSicom?.preview?.required_columns_ok ? "OK" : "Faltan columnas"}</b></div>
+      </div>
+
+      {#if Array.isArray(previewSicom?.preview?.sheet_names) && previewSicom.preview.sheet_names.length}
+        <div class="mt-2 text-sm">
+          <span class="opacity-70">Solapas:</span>
+          <span>{previewSicom.preview.sheet_names.join(", ")}</span>
+        </div>
+      {/if}
+
+      {#if Array.isArray(previewSicom?.preview?.banks) && previewSicom.preview.banks.length}
+        <div class="mt-2">
+          <div class="text-sm opacity-70 mb-1">Distribución por banco</div>
+          <div class="flex justify-end mb-2">
+            <CopyTableButton tableId="sicom-banks-table" />
+          </div>
+          <div class="overflow-x-auto">
+            <table id="sicom-banks-table" class="table table-xs">
+              <thead>
+                <tr>
+                  <th>Banco</th>
+                  <th>Filas</th>
+                  <th>Imp. Neto</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each previewSicom.preview.banks as bank (bank.bank_raw)}
+                  <tr>
+                    <td>{bank.bank_raw || "—"}</td>
+                    <td>{bank.rows ?? 0}</td>
+                    <td>{bank.imp_neto_total ?? 0}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      {/if}
+
+      {#if previewSicom?.preview?.relation_summary}
+        <div class="mt-2 text-sm">
+          <span class="opacity-70">Relación OP ↔ Nº Pago:</span>
+          <b> OP multi-lote {previewSicom.preview.relation_summary.op_multi_nro_pago_count ?? 0}</b>
+          <span> · </span>
+          <b>Lote multi-OP {previewSicom.preview.relation_summary.nro_pago_multi_op_count ?? 0}</b>
+        </div>
+      {/if}
+
+      <div class="mt-3 flex gap-2 items-center">
+        {#if !previewSicom?.confirmed}
+          <button class="btn btn-primary" on:click|preventDefault={()=>onConfirmPreview("sicom")} disabled={confirmBusySicom || (previewSicom?.validation?.is_valid === false)}>
+            {#if confirmBusySicom}<span class="loading loading-spinner loading-sm mr-2"></span>{:else}Confirmar y procesar{/if}
+          </button>
+        {:else}
+          <span class="badge badge-success">Confirmado</span>
+        {/if}
+        <button class="btn btn-ghost" on:click={() => (previewSicom = null)}>Descartar</button>
+      </div>
+    </div>
+  </section>
+{/if}
+
 <!-- CTA: Iniciar conciliación -->
 {#if previewExtracto?.confirmed && previewContable?.confirmed}
-  <div class="mt-4 flex">
-    <button class="btn btn-primary" on:click|preventDefault={startWizard} disabled={wizardBusy || reconciling} aria-busy={wizardBusy || reconciling}>
+  <div class="mt-4 mb-8 flex">
+    <button class="btn btn-primary" on:click|preventDefault={startWizard} disabled={role === 'CONSULTA' || wizardBusy || reconciling} aria-busy={wizardBusy || reconciling}>
       {#if wizardBusy}
-        <span class="loading loading-spinner loading-sm mr-2" /> Abriendo…
+        <span class="loading loading-spinner loading-sm mr-2"></span> Abriendo…
       {:else}
         Abrir asistente de conciliación
       {/if}
@@ -1274,15 +1460,23 @@ $effect(() => {
 
 <!-- Resultados -->
 {#if results || reconciling}
-  <ReconciliarResumen client:load uriExtracto={previewExtracto?.original_uri} uriContable={previewContable?.original_uri} />
+  <ReconciliarResumen
+    uriExtracto={previewExtracto?.original_uri}
+    uriContable={previewContable?.original_uri}
+    uriSicom={previewSicom?.canonical_uri || previewSicom?.original_uri}
+    bankScope={previewExtracto?.detected?.bank || previewContable?.detected?.bank}
+    accountScope={previewExtracto?.detected?.account_full || previewExtracto?.detected?.account_core_dv || previewContable?.detected?.account_full || previewContable?.detected?.account_core_dv}
+  />
   <!-- Detalle separado, consumiendo /api/reconcile/details -->
   <ReconciliarDetalle
     urlRest={URL_REST}
     threadId={threadId}
     extractoUri={previewExtracto?.original_uri}
     contableUri={previewContable?.original_uri}
+    sicomUri={previewSicom?.canonical_uri || previewSicom?.original_uri}
+    bankScope={previewExtracto?.detected?.bank || previewContable?.detected?.bank}
+    accountScope={previewExtracto?.detected?.account_full || previewExtracto?.detected?.account_core_dv || previewContable?.detected?.account_full || previewContable?.detected?.account_core_dv}
     summary={results}
-    client:load
   />  
 {/if}
 
