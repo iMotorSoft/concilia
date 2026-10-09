@@ -1,0 +1,8 @@
+......................                                                   [100%]
+=============================== warnings summary ===============================
+tests/test_sniff_bank.py: 11 warnings
+  /media/issajar/DEVELOP/Projects/iMotorSoft/ai/dev/concilia/SrvRestAstroLS_v1/services/ingest/sniff_bank.py:835: UserWarning: Could not infer format, so each element will be parsed individually, falling back to `dateutil`. To ensure parsing is consistent and as-expected, please specify a format.
+    parsed = pd.to_datetime(s2, errors="coerce", dayfirst=True)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+22 passed, 11 warnings in 10.54s

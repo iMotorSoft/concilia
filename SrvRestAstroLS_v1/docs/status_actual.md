@@ -4,6 +4,27 @@ Fecha: 2026-07-16
 Proyecto: `SrvRestAstroLS_v1`
 Tema activo: `SICOM` en uploads + estabilidad del wizard de conciliación
 
+## SEG-01 HTTP DEV — cerrado en DEV (2026-10-09)
+
+El entrypoint real `SrvRestAstroLS_v1/ls_iMotorSoft_Srv01.py:app` integra sesiones PostgreSQL,
+guard central deny-by-default, CSRF, roles y autenticación frontend en `/reconciliar`.
+Todas las rutas de negocio montadas rechazan HTTP anónimo; SSE revalida la sesión por evento.
+Login/logout/me, usuarios, cambio y recuperación asistida de contraseña tienen pruebas HTTP reales.
+
+`CONCILIA_V2_SEG01_HTTP_DEV=PASS` y `CONCILIA_V2_SEG01_DEV=PASS` para el despliegue DEV actual.
+`seg_files` conserva UUIDs permanentes, autorización e integridad SHA-256; carga/derivación
+y su auditoría comparten transacción. Los 588 históricos permanecen intactos y no se registraron.
+
+Auditoría integrada en confirmación temporal, cálculo, wizard, administración y rechazos/errores.
+Confirmaciones y wizard siguen **en memoria**, sin decisiones financieras durables ni modelo anual.
+Chromium autenticado/anónimo y reinicio real backend/frontend PASS; 22 tests PASS; build PASS.
+Usuarios sintéticos aprovisionados localmente, desactivados y sesiones revocadas; artefactos retirados.
+No existe script `pnpm check` en este checkout (limitación previa). No se implementaron fases 1–2.
+
+Evidencia vigente y alcance: `data/reports/seg01_final_closure_dev.md`.
+Evidencia anterior: `data/reports/concilia_v2_seg01_http_dev.md` y
+`data/reports/seg01_closure_files_dev.md`.
+
 ## Estado funcional confirmado
 
 Quedo confirmado lo siguiente:

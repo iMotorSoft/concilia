@@ -66,9 +66,45 @@ Con ventana de 30 días aparecen combinaciones más extensas (hasta 6 PILAGA) qu
 Para aplicar ventanas amplias sin perder control se propone separar cuatro conjuntos:
 
 1. **Exactos 1→1**: matches tradicionales mono-movimiento; se consideran conciliados automáticos.
-2. **Agrupados aprobados (N→1)**: combinaciones multi-movimiento con reglas fuertes (suma exacta, ventana dentro de lo permitido, referencias coincidentes). También se marcan como conciliados automáticos.
+2. **Agrupados aprobados (N→1)**: combinaciones multi-movimiento con reglas fuertes. Sin SICOM, la suma exacta y la ventana pueden alcanzar; con SICOM, ademas debe existir respaldo `Nro Pago + OP`. Tambien se marcan como conciliados automaticos.
 3. **Sugeridos (N→1 por revisar)**: coincidencias numéricas válidas pero con menor confianza (fechas alejadas, N grande, documentos heterogéneos). Se devuelven aparte para que el usuario los apruebe o rechace antes de restarlos de los “sobrantes”.
 4. **No conciliados**: movimientos que no entran en ninguna de las categorías anteriores (siguen apareciendo como “No en Banco / No en PILAGA” hasta que exista un match o se cierre manualmente).
+
+### 5.2 Restriccion vigente cuando hay SICOM
+
+Actualizacion 2026-05-05:
+
+La heuristica N->1 por suma exacta no puede aprobar automaticamente agrupados cuando la corrida incluye `SICOM`.
+
+Regla:
+
+- con `uri_sicom` presente, un grupo aprobado debe tener soporte SICOM;
+- si el banco matchea un lote SICOM por `Fecha de Pago + Imp.Neto`, el `Nro Pago` de ese lote manda;
+- las componentes PILAGA deben ser OP pertenecientes a ese mismo `Nro Pago`;
+- un grupo con componentes `0 match(es)` SICOM se descarta como aprobado;
+- la suma exacta por si sola queda como fallback de corridas sin SICOM o como caso de auditoria fuera del circuito SICOM aprobado.
+- los casos descartados no se ocultan: se exponen en `Agrupaciones sugeridas / auditoria` con `audit_reason` y sin consumir filas como conciliadas.
+
+Caso que no debe volver a aprobarse:
+
+- banco `2025-11-26 -$3.100.000,00`;
+- componentes `9445/2025`, `9956/2025`, `9620/2025`, `9938/2025`;
+- suma exacta `-$3.100.000,00`;
+- esas OP no existen en `Base.xlsx`;
+- no hay lote SICOM para ese movimiento;
+- por lo tanto no es un agrupado aprobado en una corrida con SICOM;
+- igualmente debe quedar visible para auditoria.
+
+Caso correcto:
+
+- banco `2025-11-03 -$21.110.000,00`;
+- `Banco Patagonia · lote 33436`;
+- OP del lote: `8902/2025`, `8906/2025`, `8907/2025`, `8908/2025`;
+- si PILAGA suma `-$22.110.000,00`, la diferencia `-$1.000.000,00` se muestra, pero no se reemplazan las OP por una combinacion numerica ajena.
+
+Documento de referencia:
+
+- [regla_sicom_nro_pago_op_2026-05-05.md](/media/issajar/DEVELOP/Projects/iMotorSoft/ai/dev/concilia/SrvRestAstroLS_v1/docs/regla_sicom_nro_pago_op_2026-05-05.md)
 
 ### Presentación sugerida en el header (UI)
 
@@ -106,7 +142,8 @@ Este documento sirve como punto de partida para implementar la lógica y coordin
 - **Ventana estándar 5 días**: la UI (Astro/Svelte) ya usa un store compartido (`DEFAULT_DAYS_WINDOW = 5`) que sincroniza el valor enviado a `/api/reconcile/start`, `/api/reconcile/summary` y todos los endpoints de detalles.
 - **Cards por área (fase 1)**: `NoBancoCard.svelte` muestra el total de PILAGA no reflejado en banco (`n op` + monto acumulado) y solo al expandirse descarga el detalle tabular. Usa un endpoint propio (`POST /api/reconcile/details/no-banco`) que retorna `{ total, total_amount, rows[] }`.
 - **Card y endpoint “Banco No reflejado en PILAGA”**: `NoContableCard.svelte` consume `POST /api/reconcile/details/no-contable`, que devuelve los sobrantes bancarios con `{ total, total_amount, rows[] }`, reutilizando el matcher actual.
-- **Card y endpoint “Agrupados aprobados (N→1)”**: `AprobadosN1Card.svelte` consume `POST /api/reconcile/details/n1/grupos`, que arma combinaciones exactas 2..6→1 sin validación manual (usa la heurística: misma ventana, mismo signo, cand_limit 20, tol $1). Se muestra como aprobados de forma automática.
+- **Card y endpoint “Agrupados aprobados (N→1)”**: `AprobadosN1Card.svelte` consume `POST /api/reconcile/details/n1/grupos`. Si hay SICOM, primero arma grupos mandatorios por lote SICOM (`Nro Pago + OP`) y filtra las componentes al lote visible. Las combinaciones libres por suma exacta solo quedan aprobadas cuando no contradicen el soporte SICOM; con `uri_sicom`, no se muestran componentes con `0 match(es)` como aprobados.
+- **Card y endpoint “Agrupaciones sugeridas / auditoria”**: `SugeridosN1Card.svelte` consume `POST /api/reconcile/details/n1/sugeridos`. Ademas de sugeridos heurísticos, expone grupos rechazados por SICOM (`estado = sicom_auditoria`) con componentes visibles y motivo de rechazo.
 - **Backend**: `routes/v1/reconcile_details.py` expone el endpoint legacy `/api/reconcile/details` y los específicos `/api/reconcile/details/no-banco`, `/api/reconcile/details/no-contable` y `/api/reconcile/details/n1/grupos`, reportando la suma de importes (`total_amount`) para alimentar los badges de la UI.
 - **Registro en el server**: `ls_iMotorSoft_Srv01.py` monta los handlers en `route_handlers`, por lo que la API ya responde en los entornos locales y remotos.
 - **Próximos pasos**: replicar el patrón card+endpoint para “Grupo N→1 confirmados”, “Sugeridos N→1” y “Conciliados 1→1”, manteniendo la misma UX de cards colapsables y contadores visibles sin abrir cada detalle.
