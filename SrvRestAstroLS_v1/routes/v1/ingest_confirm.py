@@ -8,9 +8,13 @@ import logging
 
 from litestar import post
 from litestar.response import Response
+from litestar.exceptions import HTTPException
+from uuid import UUID
 
 from .agui_notify import emit
+from backend.http.audit import audit_temporary
 import globalVar as Var
+from services.ingest.sicom_excel import inspect_sicom_workbook
 
 from pathlib import Path
 from urllib.parse import urlparse
@@ -21,7 +25,7 @@ import re
 logger = logging.getLogger(__name__)
 
 # Estado en memoria por threadId
-# _CONFIRMS[threadId] = {"extracto": {...} | None, "contable": {...} | None}
+# _CONFIRMS[threadId] = {"extracto": {...} | None, "contable": {...} | None, "sicom": {...} | None}
 _CONFIRMS: Dict[str, Dict[str, Optional[dict]]] = {}
 
 _SAFE_NAME_RX = re.compile(r"[^A-Za-z0-9._-]+")
@@ -85,12 +89,15 @@ def _build_canonical_parquet(role: str, original_uri: str, *, bank: str | None, 
     if str(original_uri).lower().endswith((".parquet", ".pq")):
         return original_uri
 
-    from routes.v1.reconcile_start import _load_extracto, _load_pilaga  # import local para evitar ciclos globales
+    from routes.v1.reconcile_start import _load_extracto, _load_pilaga, _load_sicom  # import local para evitar ciclos globales
 
     src_path = _from_file_uri(original_uri)
     if role == "extracto":
         df = _load_extracto(src_path)
         prefix = "extracto"
+    elif role == "sicom":
+        df = _load_sicom(src_path)
+        prefix = "sicom"
     else:
         df = _load_pilaga(src_path)
         prefix = "contable"
@@ -150,14 +157,18 @@ async def _maybe_emit_ready(thread_id: str) -> None:
         manifest_uri = extracto.get("manifest_uri")
         if not manifest_uri:
             manifest_uri = _build_extracto_manifest([uri for uri in canonical_uris if uri])
+            manifest_ref = await state["_catalog"].register(
+                _from_file_uri(manifest_uri), "extracto", state["_actor"], state["_correlation"],
+                UUID(items[0]["source_file_id"]))
             extracto["manifest_uri"] = manifest_uri
-        extracto_uri = manifest_uri
+            extracto["manifest_ref"] = manifest_ref
+        extracto_uri = extracto.get("manifest_ref")
     else:
-        extracto_uri = items[0].get("canonical_uri") or items[0].get("original_uri")
+        extracto_uri = items[0].get("canonical_ref") or items[0].get("source_file_id")
         if not extracto_uri:
             return
 
-    contable_uri = contable.get("canonical_uri") or contable.get("original_uri")
+    contable_uri = contable.get("canonical_ref") or contable.get("source_file_id")
 
     bank_consensus = None
     extracto_banks = [item.get("bank") for item in items if item.get("bank")]
@@ -206,9 +217,16 @@ async def _canonicalize_async(
             period_to=period_to,
         )
 
-        state = _CONFIRMS.setdefault(thread_id, {"extracto": None, "contable": None})
+        state = _CONFIRMS.setdefault(thread_id, {"extracto": None, "contable": None, "sicom": None})
         if state.get(role) is None:
             state[role] = {}
+        target = state[role]
+        if role == "extracto" and item_id:
+            target = next(item for item in state[role]["items"] if item["item_id"] == item_id)
+        canonical_ref = await state["_catalog"].register(
+            _from_file_uri(canonical_uri), role, state["_actor"], state["_correlation"],
+            UUID(target["source_file_id"]))
+        target["canonical_ref"] = canonical_ref
         if role == "extracto" and item_id:
             items = state[role].get("items") or []
             for item in items:
@@ -218,15 +236,39 @@ async def _canonicalize_async(
         else:
             state[role]["canonical_uri"] = canonical_uri
 
+        payload: dict[str, Any] = {"role": role, "canonical_uri": canonical_ref}
+        if role == "sicom":
+            sicom_info = inspect_sicom_workbook(_from_file_uri(original_uri))
+            preview = dict(sicom_info.get("preview") or {})
+            state[role].update({
+                "bank_names_available": preview.get("bank_names_available") or [],
+                "bank_count": preview.get("bank_count"),
+                "period_from_detected": preview.get("period_from"),
+                "period_to_detected": preview.get("period_to"),
+                "sheet_count": preview.get("sheet_count"),
+            })
+            payload.update({
+                "bank_names_available": preview.get("bank_names_available") or [],
+                "bank_count": preview.get("bank_count"),
+                "period_from_detected": preview.get("period_from"),
+                "period_to_detected": preview.get("period_to"),
+                "sheet_count": preview.get("sheet_count"),
+            })
+
         await emit(thread_id, {
             "type": "INGEST_CANONICAL_READY",
-            "payload": {"role": role, "canonical_uri": canonical_uri},
+            "payload": payload,
         })
         await _maybe_emit_ready(thread_id)
     except Exception as e:
+        state = _CONFIRMS.get(thread_id) or {}
+        if state.get('_security'):
+            await state['_security'].audit_operation(
+                state['_actor'], 'ingest_canonical_error', thread_id, 'FAILURE', state['_correlation'],
+                'derivation failed; no durable financial decision')
         await emit(thread_id, {
             "type": "TOAST", "level": "warning",
-            "message": f"No se pudo generar canónico ({role}): {type(e).__name__}: {e}",
+            "message": f"No se pudo generar canónico ({role})",
         })
 
 def _iso_date_min(a: Optional[str], b: Optional[str]) -> Optional[str]:
@@ -248,7 +290,7 @@ async def ingest_confirm(request: Any) -> Response:
     """
     Confirma un preview. Espera multipart/form-data:
       - threadId (obligatorio)
-      - role: extracto | contable (obligatorio)
+      - role: extracto | contable | sicom (obligatorio)
       - source_file_id, original_uri, bank, period_from, period_to (opcionales)
     Side-effects:
       - Guarda estado por threadId/role.
@@ -260,16 +302,27 @@ async def ingest_confirm(request: Any) -> Response:
 
     if not threadId:
         return Response({"ok": False, "message": "Falta threadId"}, status_code=400)
-    if role not in {"extracto", "contable"}:
-        return Response({"ok": False, "message": "role inválido (use extracto|contable)"}, status_code=400)
+    if role not in {"extracto", "contable", "sicom"}:
+        return Response({"ok": False, "message": "role inválido (use extracto|contable|sicom)"}, status_code=400)
 
-    source_file_id = (form.get("source_file_id") or "").strip()
     original_uri   = (form.get("original_uri") or "").strip()
+    source_file_id = request.state.file_refs.get(original_uri, "")
+    if not source_file_id:
+        return Response({"ok": False, "message": "Falta referencia de archivo"}, status_code=400)
     bank           = (form.get("bank") or "").strip() or None
     period_from    = (form.get("period_from") or "").strip() or None
     period_to      = (form.get("period_to") or "").strip() or None
 
-    state = _CONFIRMS.setdefault(threadId, {"extracto": None, "contable": None})
+    state = _CONFIRMS.get(threadId)
+    actor = request.state.principal.id
+    if state and state.get("_actor") != actor:
+        raise HTTPException(status_code=403, detail="Ingest reference denied")
+    await audit_temporary(request, 'ingest_confirm_temporary', source_file_id)
+    if state is None:
+        state = {"extracto": None, "contable": None, "sicom": None,
+                 "_catalog": request.app.state.files, "_security": request.app.state.security,
+                 "_actor": actor, "_correlation": request.state.correlation_id}
+        _CONFIRMS[threadId] = state
     if role == "extracto":
         original_uris = _form_values(form, "original_uri")
         source_ids = _form_values(form, "source_file_id")
@@ -285,7 +338,7 @@ async def ingest_confirm(request: Any) -> Response:
         for idx, uri in enumerate(original_uris):
             new_items.append({
                 "item_id": str(uuid4()),
-                "source_file_id": _value_for_index(source_ids, idx) or "",
+                "source_file_id": request.state.file_refs[uri],
                 "original_uri": uri,
                 "bank": _value_for_index(banks, idx),
                 "period_from": _value_for_index(period_froms, idx),
@@ -349,4 +402,4 @@ async def ingest_confirm(request: Any) -> Response:
 
 # Exponer estado para otros endpoints (reconcile_start)
 def get_confirms(thread_id: str) -> Dict[str, Optional[dict]]:
-    return _CONFIRMS.get(thread_id, {"extracto": None, "contable": None})
+    return _CONFIRMS.get(thread_id, {"extracto": None, "contable": None, "sicom": None})

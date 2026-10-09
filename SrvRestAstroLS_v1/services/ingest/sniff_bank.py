@@ -21,6 +21,23 @@ ACCOUNT_MAP = {
     "3-111-0100026005-5": {"bank": "ciudad", "display": "Banco Ciudad - CC $"},
     "100-393300535-000": {"bank": "patagonia", "display": "Banco Patagonia - CC $"},
     "163-0-015508/3":    {"bank": "santander", "display": "Banco Santander - CC $"},
+    "00.060.678/47":      {"bank": "nacion", "display": "Banco Nación Argentina - CC $"},
+    "00.064.464/16":      {"bank": "nacion", "display": "Banco Nación Argentina - CC $"},
+    "00.300.318/81":      {"bank": "nacion", "display": "Banco Nación Argentina - CC $"},
+    "00.300.011/39":      {"bank": "nacion", "display": "Banco Nación Argentina - CC $"},
+    "00.300.285/28":      {"bank": "nacion", "display": "Banco Nación Argentina - CC $"},
+    "00.300.342/90":      {"bank": "nacion", "display": "Banco Nación Argentina - CC $"},
+    "00.001.914/85":      {"bank": "nacion", "display": "Banco Nación Argentina - CC $"},
+    "03.050.233/8":       {"bank": "nacion", "display": "Banco Nación Argentina - CC $"},
+    "50289/6":             {"bank": "provincia", "display": "Banco Provincia - CC $"},
+}
+
+# Códigos breves informados por la Facultad. Se resuelven contra la cuenta
+# canónica del extracto para aceptar ambas representaciones.
+ACCOUNT_ALIASES = {
+    "155083": "163-0-015508/3",
+    "393300535": "100-393300535-000",
+    "260055": "3-111-0100026005-5",
 }
 
 PREFERRED_GL_SHEET_NAMES = ["archivo contable", "contable", "resumen"]  # intentos por nombre de hoja
@@ -47,6 +64,31 @@ PILAGA_HEADER_KEYWORDS = (
     "RESUMEN CUENTA TESORERIA",
     "RESUMEN CUENTA TESORERÍA",
 )
+
+
+def _account_key(value: Any) -> str:
+    """Normaliza la cuenta para comparar variantes con ceros/separadores."""
+    digits = re.sub(r"\D+", "", str(value or ""))
+    return digits.lstrip("0") or "0"
+
+
+def _lookup_account_mapping(value: Any) -> tuple[str, dict] | None:
+    account = str(value or "").strip()
+    if not account:
+        return None
+    if account in ACCOUNT_MAP:
+        return account, ACCOUNT_MAP[account]
+
+    key = _account_key(account)
+    alias_full = ACCOUNT_ALIASES.get(key)
+    if alias_full:
+        return alias_full, ACCOUNT_MAP[alias_full]
+
+    candidates = [full for full in ACCOUNT_MAP if _account_key(full) == key]
+    if len(candidates) == 1:
+        full = candidates[0]
+        return full, ACCOUNT_MAP[full]
+    return None
 
 # ===== Safe wrapper pública =====
 def sniff_file(path: Path | str, filename_hint: Optional[str] = None) -> dict:
@@ -152,9 +194,10 @@ def sniff_excel(path: Path, filename_hint: Optional[str]) -> dict:
     bank = None
     account_full: Optional[str] = None
 
-    if account_core_dv and account_core_dv in ACCOUNT_MAP:
-        bank = ACCOUNT_MAP[account_core_dv]["bank"]
-        account_full = account_core_dv
+    mapped_account = _lookup_account_mapping(account_core_dv)
+    if mapped_account:
+        account_full, account_info = mapped_account
+        bank = account_info["bank"]
 
     if kind == "gl" and not bank and account_core_dv and RE_PILAGA_ACCOUNT.fullmatch(str(account_core_dv)):
         mapped_full = map_short_account_to_full(account_core_dv)
@@ -262,12 +305,27 @@ def columns_look_like_bank(cols: list[str]) -> bool:
     return has_fecha and (has_desc or money_any or saldo_any)
 
 # ===== Header parsing & helpers =====
+def _prepare_worksheet_for_scan(ws: Any) -> None:
+    """Hace que ``openpyxl`` recorra el XML real, no solo su dimensión declarada.
+
+    Algunos extractos exportados por bancos incluyen un ``<dimension ref="A1"/>``
+    incorrecto. En modo ``read_only`` openpyxl toma ese dato como límite y oculta
+    la cabecera y todos los movimientos. Restablecer la dimensión conserva la
+    lectura en streaming, pero permite que ``iter_rows`` alcance las celdas que
+    efectivamente están en el archivo.
+    """
+    reset_dimensions = getattr(ws, "reset_dimensions", None)
+    if callable(reset_dimensions):
+        reset_dimensions()
+
+
 def read_excel_header_grid(path: Path, max_rows: int = 20, max_cols: int = 12) -> list[list[str]]:
     if not load_workbook:
         return []
     try:
         wb = load_workbook(filename=str(path), read_only=True, data_only=True)
         ws = wb.worksheets[0]
+        _prepare_worksheet_for_scan(ws)
         grid: list[list[str]] = []
         for r in ws.iter_rows(min_row=1, max_row=max_rows, min_col=1, max_col=max_cols, values_only=True):
             row = [(str(c).strip() if c not in (None, "") else "") for c in r]
@@ -469,6 +527,7 @@ def validate_bank_extract(path: Path, header_from: Optional[str], header_to: Opt
     try:
         wb = load_workbook(filename=str(path), read_only=True, data_only=True)
         ws = wb.worksheets[0]
+        _prepare_worksheet_for_scan(ws)
 
         header_row, header_cols = find_bank_header_row(ws)
         if header_row is None:
@@ -586,6 +645,7 @@ def validate_gl_pilaga(path: Path) -> dict:
     try:
         wb = load_workbook(filename=str(path), read_only=True, data_only=True)
         ws = wb.worksheets[0]
+        _prepare_worksheet_for_scan(ws)
 
         header_row, header_cols = find_pilaga_header_row(ws)
         if header_row is None:
@@ -710,6 +770,7 @@ def scan_worksheet_dates(path: Path, max_rows: int = 30000) -> tuple[Optional[st
     try:
         wb = load_workbook(filename=str(path), read_only=True, data_only=True)
         ws = wb.worksheets[0]
+        _prepare_worksheet_for_scan(ws)
         dmin: Optional[date] = None
         dmax: Optional[date] = None
 
@@ -813,6 +874,10 @@ def read_csv_preview(path: Path) -> tuple[list[str], list[list[Any]], Optional[s
 
 # ===== Mapeo short → full =====
 def map_short_account_to_full(short_code: str) -> Optional[str]:
+    mapped = _lookup_account_mapping(short_code)
+    if mapped:
+        return mapped[0]
+
     short_digits = re.sub(r"\D+", "", short_code or "")  # '26005/5' → '260055'
     if not short_digits:
         return None

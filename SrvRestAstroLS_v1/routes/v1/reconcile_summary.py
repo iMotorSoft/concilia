@@ -17,8 +17,10 @@ from .reconcile_start import (
     _from_file_uri,              # convierte file://... en Path
     _load_pilaga,                # DF con ingreso/egreso originales + monto neto
     _load_extracto,              # DF: ['fecha','monto','documento','origen']  (importe limpio)
+    _load_sicom,
     _get_extracto_saldos,
     _get_pilaga_saldos,
+    _build_sicom_insights,
 )
 # Pipeline completo (pares, agrupados, sugeridos, sobrantes)
 from .reconcile_details import _compute_pipeline
@@ -72,7 +74,16 @@ def _sum_pilaga_totals(df: pd.DataFrame) -> Tuple[float, float, float]:
     p_egr = float((-s[s < 0]).sum())
     return (round(p_ing, 2), round(p_egr, 2), round(p_ing - p_egr, 2))
 
-def _build_summary(uri_extracto: str, uri_contable: str, days_window: int, *, include_descomposicion: bool = True) -> dict[str, Any]:
+def _build_summary(
+    uri_extracto: str,
+    uri_contable: str,
+    days_window: int,
+    *,
+    uri_sicom: str = "",
+    bank_scope: str = "",
+    account_scope: str = "",
+    include_descomposicion: bool = True,
+) -> dict[str, Any]:
     """Genera el resumen completo; opcionalmente omite la descomposición."""
     t_start = time.perf_counter()
     path_extracto = _from_file_uri(uri_extracto)
@@ -82,6 +93,7 @@ def _build_summary(uri_extracto: str, uri_contable: str, days_window: int, *, in
     t_load_start = time.perf_counter()
     df_pilaga  = _filter_movements_df(_load_pilaga(path_contable))
     df_banco   = _filter_movements_df(_load_extracto(path_extracto))
+    df_sicom = _load_sicom(_from_file_uri(uri_sicom)) if uri_sicom else None
     t_after_load = time.perf_counter()
 
     # 2) Totales:
@@ -141,6 +153,16 @@ def _build_summary(uri_extracto: str, uri_contable: str, days_window: int, *, in
         },
     }
 
+    if df_sicom is not None:
+        summary["sicom"] = _build_sicom_insights(
+            df_sicom,
+            df_pilaga,
+            df_banco,
+            bank_scope=bank_scope,
+            account_scope=account_scope,
+            path_extracto=path_extracto,
+        )
+
     if include_descomposicion:
         conciliados_amount = float(pd.to_numeric(pairs_df["monto_r"], errors="coerce").fillna(0).sum()) if not pairs_df.empty else 0.0
         agrupados_amount = float(sum((g.get("monto_total") or 0.0) for g in approved))
@@ -159,12 +181,15 @@ def _build_summary(uri_extracto: str, uri_contable: str, days_window: int, *, in
     return summary
 
 
-def _parse_form(request: Any) -> tuple[str, str, int]:
+def _parse_form(request: Any) -> tuple[str, str, str, str, str, int]:
     form = request
     uri_extracto = form.get("uri_extracto") or form.get("extracto_original_uri") or ""
     uri_contable = form.get("uri_contable") or form.get("contable_original_uri") or ""
+    uri_sicom = form.get("uri_sicom") or form.get("sicom_original_uri") or ""
+    bank_scope = str(form.get("bank_scope") or "").strip()
+    account_scope = str(form.get("account_scope") or "").strip()
     days_window  = int(form.get("days_window") or 5)
-    return uri_extracto, uri_contable, days_window
+    return uri_extracto, uri_contable, uri_sicom, bank_scope, account_scope, days_window
 
 
 @post("/api/reconcile/summary")
@@ -183,12 +208,20 @@ async def reconcile_summary(request: Any) -> Response:
     """
     try:
         form = await request.form()
-        uri_extracto, uri_contable, days_window = _parse_form(form)
+        uri_extracto, uri_contable, uri_sicom, bank_scope, account_scope, days_window = _parse_form(form)
 
         if not uri_extracto or not uri_contable:
             return Response({"ok": False, "message": "Faltan URIs: uri_extracto y uri_contable son obligatorios."}, status_code=400)
 
-        summary = _build_summary(uri_extracto, uri_contable, days_window, include_descomposicion=True)
+        summary = _build_summary(
+            uri_extracto,
+            uri_contable,
+            days_window,
+            uri_sicom=uri_sicom,
+            bank_scope=bank_scope,
+            account_scope=account_scope,
+            include_descomposicion=True,
+        )
 
         return Response({"ok": True, "summary": summary}, status_code=200)
 
@@ -207,12 +240,20 @@ async def reconcile_summary_head(request: Any) -> Response:
     """Devuelve solo el head (totales/cantidades) sin la descomposición."""
     try:
         form = await request.form()
-        uri_extracto, uri_contable, days_window = _parse_form(form)
+        uri_extracto, uri_contable, uri_sicom, bank_scope, account_scope, days_window = _parse_form(form)
 
         if not uri_extracto or not uri_contable:
             return Response({"ok": False, "message": "Faltan URIs: uri_extracto y uri_contable son obligatorios."}, status_code=400)
 
-        summary = _build_summary(uri_extracto, uri_contable, days_window, include_descomposicion=False)
+        summary = _build_summary(
+            uri_extracto,
+            uri_contable,
+            days_window,
+            uri_sicom=uri_sicom,
+            bank_scope=bank_scope,
+            account_scope=account_scope,
+            include_descomposicion=False,
+        )
         return Response({"ok": True, "summary": summary}, status_code=200)
     except Exception as e:
         tb = traceback.format_exc(limit=12)
@@ -229,12 +270,20 @@ async def reconcile_summary_descomposicion(request: Any) -> Response:
     """Devuelve solo la descomposición de movimientos."""
     try:
         form = await request.form()
-        uri_extracto, uri_contable, days_window = _parse_form(form)
+        uri_extracto, uri_contable, uri_sicom, bank_scope, account_scope, days_window = _parse_form(form)
 
         if not uri_extracto or not uri_contable:
             return Response({"ok": False, "message": "Faltan URIs: uri_extracto y uri_contable son obligatorios."}, status_code=400)
 
-        summary = _build_summary(uri_extracto, uri_contable, days_window, include_descomposicion=True)
+        summary = _build_summary(
+            uri_extracto,
+            uri_contable,
+            days_window,
+            uri_sicom=uri_sicom,
+            bank_scope=bank_scope,
+            account_scope=account_scope,
+            include_descomposicion=True,
+        )
         descomposicion = summary.get("descomposicion", {})
         return Response({"ok": True, "descomposicion": descomposicion, "days_window": summary.get("days_window")}, status_code=200)
     except Exception as e:

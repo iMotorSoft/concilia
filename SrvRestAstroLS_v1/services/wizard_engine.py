@@ -151,28 +151,6 @@ def _scope_form(state: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _window_form(state: Dict[str, Any]) -> Dict[str, Any]:
-    window_days = normalize_window_days(state["selection"].get("window_days"))
-    return {
-        "id": "window_form",
-        "title": "Ventana maxima de dias",
-        "fields": [
-            {
-                "name": "window_days",
-                "type": "slider",
-                "min": WINDOW_DAYS_MIN,
-                "max": WINDOW_DAYS_MAX,
-                "step": 1,
-                "value": window_days,
-            }
-        ],
-        "actions": {
-            "next": {"enabled": True},
-            "back": {"enabled": True},
-        },
-    }
-
-
 def _summary_form(state: Dict[str, Any], preview: Dict[str, Any]) -> Dict[str, Any]:
     warnings = []
     missing = preview.get("missing_months") or []
@@ -189,7 +167,6 @@ def _summary_form(state: Dict[str, Any], preview: Dict[str, Any]) -> Dict[str, A
         "title": "Resumen",
         "fields": [
             {"name": "months", "type": "list", "value": state["selection"].get("months") or [], "readonly": True},
-            {"name": "window_days", "type": "number", "value": state["selection"].get("window_days"), "readonly": True},
             {"name": "window_range", "type": "text", "value": state["selection"].get("window_range"), "readonly": True},
             {"name": "range", "type": "text", "value": preview.get("range") or [], "readonly": True},
             {"name": "files_count", "type": "number", "value": len(preview.get("files") or []), "readonly": True},
@@ -214,9 +191,6 @@ def _step_events(state: Dict[str, Any], preview: Dict[str, Any]) -> List[Dict[st
         events.append(_event("TEXT_MESSAGE_ADD", {"role": "assistant", "text": "Selecciona los meses a conciliar."}))
         items = _month_items(preview, state["selection"].get("months") or [])
         events.append(_event("LIST_SNAPSHOT", {"step": step, "items": items}))
-    elif step == "WINDOW":
-        events.append(_event("TEXT_MESSAGE_ADD", {"role": "assistant", "text": "Ajusta la ventana maxima de dias."}))
-        events.append(_event("FORM_SNAPSHOT", {"step": step, "form": _window_form(state)}))
     elif step == "SUMMARY":
         events.append(_event("TEXT_MESSAGE_ADD", {"role": "assistant", "text": "Revisa el resumen antes de confirmar."}))
         events.append(_event("FORM_SNAPSHOT", {"step": step, "form": _summary_form(state, preview)}))

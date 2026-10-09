@@ -41,9 +41,17 @@ async def chat_turn(data: Dict[str, Any]) -> Response:
         })
         return Response({"ok": True}, status_code=200)
 
+    # Intent: subir sicom
+    if re.search(r"\bsicom\b", text):
+        await push({
+            "type": "TEXT_MESSAGE_REQUEST_UPLOAD",
+            "payload": { "form": upload_form("/api/uploads/v2/ingest?role=sicom", ".xlsx,.xls") },
+        })
+        return Response({"ok": True}, status_code=200)
+
     # Fallback
     await push({
         "type": "TEXT_MESSAGE_CONTENT",
-        "delta": "Decime 'subir extracto' o 'subir contable' para abrir el modal.",
+        "delta": "Decime 'subir extracto', 'subir contable' o 'subir sicom' para abrir el modal.",
     })
     return Response({"ok": True}, status_code=200)

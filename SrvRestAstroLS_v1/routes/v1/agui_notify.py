@@ -7,7 +7,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 import anyio
-from litestar import get
+from litestar import get, Request
 from litestar.response import Stream
 
 from services.json_safe import json_default, to_jsonable
@@ -19,9 +19,6 @@ SSE_HEADERS = {
     "Connection": "keep-alive",
     "X-Accel-Buffering": "no",
     "Content-Type": "text/event-stream; charset=utf-8",
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Last-Event-ID",
     "Vary": "Origin",
 }
 
@@ -45,8 +42,8 @@ async def emit(thread_id: Optional[str], payload: Dict[str, Any]) -> None:
         _PENDING.setdefault(t, []).append(payload)
 
 @get("/api/ag-ui/notify/stream", media_type="text/event-stream", status_code=200)
-async def notify_stream(threadId: Optional[str] = None) -> Stream:
-    t = _topic(threadId)
+async def notify_stream(request: Request, threadId: Optional[str] = None) -> Stream:
+    t = str(request.state.principal.id) + ':' + _topic(threadId)
     q: asyncio.Queue = asyncio.Queue()
     _SUBS[t] = q
 

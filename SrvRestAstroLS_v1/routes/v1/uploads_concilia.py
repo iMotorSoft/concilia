@@ -1,17 +1,14 @@
 # SrvRestAstroLS_v1/routes/v1/uploads_concilia.py
 from __future__ import annotations
 import asyncio
-import shutil
 import traceback
 from pathlib import Path
-from urllib.parse import urlparse
 from uuid import uuid4
 from typing import Any
 
 from litestar import post
 from litestar.response import Response
 
-import globalVar as Var
 from .agui_notify import emit
 from services.ingest.sniff_bank import sniff_file
 
@@ -39,34 +36,16 @@ async def upload_bank_movements(request: Any) -> Response:
                 media_type="application/json",
             )
 
-        # 1) Guardar a /tmp en streaming
-        filename = getattr(file, "filename", None) or f"upload_{uuid4()}.bin"
-        tmp_path = Path(f"/tmp/{uuid4()}_{filename}")
-        bytes_written = 0
-        with open(tmp_path, "wb") as out:
-            while True:
-                chunk = await file.read(1024 * 1024)
-                if not chunk:
-                    break
-                out.write(chunk)
-                bytes_written += len(chunk)
-
-        # 2) Mover a storage/incoming
-        original_uri = Var.resolve_storage_uri("incoming", filename=filename)
-        if not original_uri.startswith("file://"):
-            return Response(
-                {"ok": False, "message": "Storage provider no soportado."},
-                status_code=500,
-                media_type="application/json",
-            )
-
-        dst = Path(urlparse(original_uri).path)
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(tmp_path, dst)
-
-        # 3) Sniff
+        # Same controlled, non-overwriting storage and persistent IDs as v2.
+        from .uploads_v2_concilia import _save_upload_to_incoming
+        filename = Path(str(getattr(file, "filename", ""))).name
+        if Path(filename).suffix.lower() not in {".xlsx", ".xls", ".xlsm", ".xltx", ".xltm", ".csv"}:
+            return Response({"ok": False, "message": "Formato de archivo no permitido"}, status_code=400)
+        _, dst, bytes_written, filename = await _save_upload_to_incoming(file, prefix="extracto")
+        source_file_id = await request.app.state.files.register(
+            dst, "extracto", request.state.principal.id, uuid4())
+        original_uri = source_file_id
         intel = sniff_file(dst, filename_hint=filename)
-        source_file_id = str(uuid4())
 
         # 4) Emitir vista previa por SSE (no bloquear)
         if threadId:
@@ -126,13 +105,13 @@ async def upload_bank_movements(request: Any) -> Response:
                 asyncio.create_task(emit(threadId, {
                     "type": "TOAST",
                     "level": "error",
-                    "message": f"Upload error: {type(e).__name__}: {e}"
+                    "message": "Error interno en upload"
                 }))
         except Exception:
             pass
 
         return Response(
-            {"ok": False, "message": "Error interno en upload", "error": f"{type(e).__name__}: {e}", "trace": tb},
+            {"ok": False, "message": "Error interno en upload"},
             status_code=500,
             media_type="application/json",
         )

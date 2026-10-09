@@ -6,7 +6,6 @@
 #
 # Env overrides:
 #   WIZARD_BASE_URL=http://localhost:7058
-#   WIZARD_WORKSPACE_ID=<uuid>
 
 from __future__ import annotations
 
@@ -19,18 +18,6 @@ from typing import Any, Dict, List, Tuple
 import requests
 
 import globalVar as Var
-from services.db_pg import connect_db, get_workspace_by_slug
-
-
-async def _resolve_workspace_id() -> str:
-    workspace_id = os.environ.get("WIZARD_WORKSPACE_ID")
-    if workspace_id:
-        return workspace_id
-    conn = await connect_db(connect_timeout=5.0, statement_timeout_ms=30000)
-    try:
-        return await get_workspace_by_slug(conn, Var.WORKSPACE_SLUG)
-    finally:
-        await conn.close()
 
 
 def _post_json(url: str, payload: Dict[str, Any], timeout: int | Tuple[int, int] = 15) -> Dict[str, Any]:
@@ -59,25 +46,33 @@ def _read_first_sse_event(url: str, timeout: Tuple[int, int] = (5, 20)) -> Dict[
     raise RuntimeError("No SSE event received")
 
 
-async def _fetch_events(run_id: str) -> List[Tuple[str, Dict[str, Any]]]:
-    conn = await connect_db(connect_timeout=5.0, statement_timeout_ms=30000)
-    try:
-        rows = await conn.fetch(
-            "SELECT type, payload FROM core_events WHERE run_id = $1 ORDER BY ts ASC, event_id ASC",
-            run_id,
-        )
-    finally:
-        await conn.close()
-    
-    def _ensure_dict(v):
-        if isinstance(v, str):
+def _read_sse_events(
+    url: str,
+    *,
+    max_seconds: int = 5,
+    stop_types: set[str] | None = None,
+) -> List[Tuple[str, Dict[str, Any]]]:
+    events: List[Tuple[str, Dict[str, Any]]] = []
+    deadline = time.time() + max_seconds
+    with requests.get(url, stream=True, timeout=(5, max_seconds)) as res:
+        if not res.ok:
+            raise RuntimeError(f"SSE {url} failed: status={res.status_code} body={res.text[:300]}")
+        for raw in res.iter_lines(decode_unicode=True):
+            if time.time() >= deadline:
+                break
+            if not raw or not raw.startswith("data: "):
+                continue
+            data = raw[len("data: ") :]
             try:
-                return json.loads(v)
+                parsed = json.loads(data)
             except Exception:
-                return {}
-        return v or {}
-
-    return [(row["type"], _ensure_dict(row["payload"])) for row in rows]
+                parsed = {"raw": data}
+            event_type = str(parsed.get("type") or "")
+            payload = parsed.get("payload") if isinstance(parsed.get("payload"), dict) else {}
+            events.append((event_type, payload))
+            if stop_types and event_type in stop_types:
+                break
+    return events
 
 
 def _ordered_subset(haystack: List[str], needles: List[str]) -> bool:
@@ -88,14 +83,12 @@ def _ordered_subset(haystack: List[str], needles: List[str]) -> bool:
 async def main() -> None:
     default_base = f"http://127.0.0.1:{Var.PUERTO}"
     base_url = os.environ.get("WIZARD_BASE_URL", default_base)
-    workspace_id = await _resolve_workspace_id()
 
     try:
         start_resp = await asyncio.to_thread(
             _post_json,
             f"{base_url}/api/reconcile_wizard/start",
             {
-                "workspace_id": workspace_id,
                 "bank": "fce",
                 "account": "001",
                 "dataset_ref": "mock",
@@ -155,7 +148,12 @@ async def main() -> None:
     events: List[Tuple[str, Dict[str, Any]]] = []
     types: List[str] = []
     while time.time() < deadline:
-        events = await _fetch_events(run_id)
+        events = await asyncio.to_thread(
+            _read_sse_events,
+            f"{base_url}/api/reconcile_wizard/runs/{run_id}/events",
+            max_seconds=3,
+            stop_types={"RUN_READY_TO_EXECUTE"},
+        )
         types = [event_type for event_type, _payload in events]
         if "RUN_READY_TO_EXECUTE" in types and "LIST_SNAPSHOT" in types:
             break

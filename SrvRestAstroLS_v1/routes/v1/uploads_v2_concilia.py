@@ -2,11 +2,10 @@
 # SrvRestAstroLS_v1/routes/v1/uploads_v2_concilia.py
 from __future__ import annotations
 import asyncio
-import shutil
 import traceback
 from pathlib import Path
 from urllib.parse import urlparse
-from uuid import uuid4
+from uuid import UUID, uuid4
 from typing import Any, Optional
 
 from litestar import post
@@ -16,6 +15,7 @@ from litestar.enums import MediaType  # 👈 usamos MediaType.JSON
 import globalVar as Var
 from .agui_notify import emit
 from services.ingest.sniff_bank import sniff_file
+from services.ingest.sicom_excel import inspect_sicom_workbook
 
 try:
     from openpyxl import load_workbook, Workbook  # type: ignore
@@ -35,6 +35,8 @@ def _merge_validation_for_role(intel: dict, role: str) -> dict | None:
         mismatch_error = f"Se detectó tipo '{kind}' y no parece extracto bancario."
     if role == "contable" and kind and kind != "gl":
         mismatch_error = f"Se detectó tipo '{kind}' y no parece contable/PILAGA."
+    if role == "sicom" and kind and kind != "sicom":
+        mismatch_error = f"Se detectó tipo '{kind}' y no parece un workbook SICOM."
 
     if not mismatch_error:
         return base
@@ -558,9 +560,14 @@ async def _save_upload_to_incoming(file: Any, *, prefix: str = "upload") -> tupl
     original_name = Path(str(original_name)).name
     stored_name = f"{uuid4()}_{original_name}"
 
-    tmp_path = Path(f"/tmp/{uuid4()}_{stored_name}")
+    from backend.repositories.files import STORAGE_ROOT
+    incoming = STORAGE_ROOT / "incoming"
+    if any(p.is_symlink() for p in (incoming, *incoming.parents)):
+        raise ValueError("Unsafe storage directory")
+    incoming.mkdir(parents=True, exist_ok=True)
+    dst = incoming / stored_name
     bytes_written = 0
-    with open(tmp_path, "wb") as out:
+    with dst.open("xb") as out:
         while True:
             chunk = await file.read(1024 * 1024)
             if not chunk:
@@ -568,21 +575,15 @@ async def _save_upload_to_incoming(file: Any, *, prefix: str = "upload") -> tupl
             out.write(chunk)
             bytes_written += len(chunk)
 
-    original_uri = Var.resolve_storage_uri("incoming", filename=stored_name)
-    if not original_uri.startswith("file://"):
-        raise RuntimeError("Storage provider no soportado.")
-    dst = Path(urlparse(original_uri).path)
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(tmp_path, dst)
-    return original_uri, dst, bytes_written, original_name
+    return dst.as_uri(), dst, bytes_written, original_name
 
 
 async def _handle_upload(request: Any, role_required: Optional[str] = None, path_label: str = "v2") -> Response:
     try:
         role = (role_required or (request.query_params.get("role") or "")).strip().lower()
-        if role not in {"extracto", "contable"}:
+        if role not in {"extracto", "contable", "sicom"}:
             return Response(
-                content={"ok": False, "message": "role inválido (use extracto|contable)"},
+                content={"ok": False, "message": "role inválido (use extracto|contable|sicom)"},
                 media_type=MediaType.JSON,
                 status_code=400,
             )
@@ -598,13 +599,26 @@ async def _handle_upload(request: Any, role_required: Optional[str] = None, path
                 media_type=MediaType.JSON,
                 status_code=400,
             )
+        if role == "sicom" and len(files) != 1:
+            return Response(
+                content={"ok": False, "message": "SICOM espera un único archivo mensual por upload."},
+                media_type=MediaType.JSON,
+                status_code=400,
+            )
 
+        allowed_uploads = {".xlsx", ".xls", ".xlsm", ".xltx", ".xltm", ".csv"}
+        if any(Path(str(getattr(f, "filename", ""))).suffix.lower() not in allowed_uploads for f in files):
+            return Response({"ok": False, "message": "Formato de archivo no permitido"}, status_code=400)
+        correlation = uuid4()  # Server-generated, never trust a client audit identifier.
+        actor = request.state.principal.id
+        catalog = request.app.state.files
         # Guardar todos a incoming (sin perder compat con 1 archivo)
         saved: list[dict] = []
         total_bytes = 0
         for f in files:
             uri, dst, b, orig_name = await _save_upload_to_incoming(f, prefix=role)
-            saved_item: dict = {"original_uri": uri, "path": str(dst), "bytes_written": b, "filename": orig_name}
+            file_id = await catalog.register(dst, role, actor, correlation)
+            saved_item: dict = {"original_uri": uri, "file_id": file_id, "path": str(dst), "bytes_written": b, "filename": orig_name}
             # Para extractos: sniff por archivo para mostrar rango/metadata en UI (1..N).
             if role == "extracto":
                 intel_u = sniff_file(dst, filename_hint=orig_name)
@@ -667,6 +681,8 @@ async def _handle_upload(request: Any, role_required: Optional[str] = None, path
                     media_type=MediaType.JSON,
                     status_code=400,
                 )
+            merged_id = await catalog.register(merged_path, role, actor, correlation,
+                                               UUID(saved[0]["file_id"]))
             original_uri = merged_uri
             dst = merged_path
             filename = merged_name
@@ -677,8 +693,43 @@ async def _handle_upload(request: Any, role_required: Optional[str] = None, path
             filename = saved[0]["filename"]
 
         # Sniff de contenido (sobre el consolidado si corresponde)
-        intel = sniff_file(dst, filename_hint=filename)
-        source_file_id = str(uuid4())
+        source_file_id = merged_id if role == "extracto" and len(saved) > 1 else saved[0]["file_id"]
+        if role == "sicom":
+            try:
+                sicom = inspect_sicom_workbook(dst)
+            except ValueError as e:
+                return Response(
+                    content={"ok": False, "message": str(e)},
+                    media_type=MediaType.JSON,
+                    status_code=400,
+                )
+            preview = dict(sicom.get("preview") or {})
+            intel = {
+                "kind": "sicom",
+                "detected": {
+                    "bank": None,
+                    "account_core_dv": None,
+                    "account_full": None,
+                    "header_excerpt": f"Workbook mensual SICOM con {preview.get('sheet_count') or 0} solapa(s) detectada(s).",
+                    "period_from": preview.get("period_from"),
+                    "period_to": preview.get("period_to"),
+                },
+                "table": {"columns": [], "sample": []},
+                "suggest": {
+                    "period_from": preview.get("period_from"),
+                    "period_to": preview.get("period_to"),
+                },
+                "needs": {
+                    "bank": False,
+                    "account_id": False,
+                    "period_range": not (preview.get("period_from") and preview.get("period_to")),
+                },
+                "validation": sicom.get("validation"),
+                "preview": preview,
+            }
+        else:
+            intel = sniff_file(dst, filename_hint=filename)
+
         validation = _merge_validation_for_role(intel, role)
         detected = dict(intel.get("detected", {}) or {})
         suggest = dict(intel.get("suggest", {}) or {})
@@ -743,6 +794,13 @@ async def _handle_upload(request: Any, role_required: Optional[str] = None, path
             needs["valid_extracto"] = True
         if validation is not None and validation.get("is_valid") is False and role == "contable":
             needs["valid_contable"] = True
+        if validation is not None and validation.get("is_valid") is False and role == "sicom":
+            needs["valid_sicom"] = True
+
+        # Public references are opaque permanent IDs, including preview metadata.
+        original_uri = source_file_id
+        for item in saved:
+            item["original_uri"] = item["file_id"]
 
         # 4) Emitir preview al topic por SSE
         if threadId:
@@ -765,6 +823,7 @@ async def _handle_upload(request: Any, role_required: Optional[str] = None, path
                     "needs": needs,
                     "kind": intel.get("kind"),
                     "validation": validation or intel.get("validation"),
+                    "preview": intel.get("preview"),
                     "meta": {
                         "bytes_written": total_bytes,
                         "filename": filename,
@@ -819,12 +878,12 @@ async def _handle_upload(request: Any, role_required: Optional[str] = None, path
             if threadId:
                 asyncio.create_task(emit(threadId, {
                     "type": "TOAST", "level": "error",
-                    "message": f"Upload error: {type(e).__name__}: {e} ({path_label})"
+                    "message": f"Error interno en upload ({path_label})"
                 }))
         except Exception:
             pass
         return Response(
-            content={"ok": False, "message": f"Error interno en upload ({path_label})", "error": f"{type(e).__name__}: {e}", "trace": tb},
+            content={"ok": False, "message": f"Error interno en upload ({path_label})"},
             media_type=MediaType.JSON,
             status_code=500,
         )

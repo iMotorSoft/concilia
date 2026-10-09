@@ -14,6 +14,10 @@ import globalVar as Var
 project_root = Path(__file__).parent.parent
 sys.path.append(str(project_root))
 
+from backend.core.config import http_security
+from backend.http.security import AUTH_HANDLERS, security_guard, security_lifespan
+from backend.http.session_stream import SessionStreamMiddleware
+
 # Rutas productivas
 from routes.v1.agui_notify import notify_stream
 from routes.v1.chat_concilia import chat_turn
@@ -64,27 +68,19 @@ route_handlers = [
 ]
 
 
-# --- CORS ---
-if Var.DEBUG:
-    cors_config = CORSConfig(
-        allow_origins=["*"],
-        allow_methods=["GET", "POST", "OPTIONS"],
-        allow_headers=["*"],
-        expose_headers=["Content-Type"],
-        allow_credentials=False,
-        max_age=86400,
-    )
-else:
-    cors_config = CORSConfig(
-        allow_origins=["https://tu-dominio-front.com"],
-        allow_methods=["GET", "POST", "OPTIONS"],
-        allow_headers=["Accept", "Content-Type", "Authorization", "Cache-Control", "Last-Event-ID", "X-Requested-With"],
-        expose_headers=["Content-Type"],
-        allow_credentials=False,
-        max_age=86400,
-    )
+# DEV-only SEG-01 boundary. There is no anonymous/fallback runtime mode.
+security_config = http_security()
+cors_config = CORSConfig(
+    allow_origins=list(security_config.origins),
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Accept", "Content-Type", "Cache-Control", "Last-Event-ID", "X-CSRF-Token"],
+    allow_credentials=True,
+    max_age=600,
+)
 
-app = Litestar(route_handlers=route_handlers, cors_config=cors_config)
+app = Litestar(route_handlers=[*route_handlers, *AUTH_HANDLERS], cors_config=cors_config,
+               guards=[security_guard], lifespan=[security_lifespan], openapi_config=None,
+               middleware=[SessionStreamMiddleware])
 try:
     Var.boot_log()
 except Exception:
@@ -97,7 +93,8 @@ if __name__ == "__main__":
         pass
     uvicorn.run(
         "ls_iMotorSoft_Srv01:app",
-        host=Var.HOST,
+        host="127.0.0.1",
         port=Var.PUERTO,
         reload=Var.DEBUG,
+        proxy_headers=False,
     )

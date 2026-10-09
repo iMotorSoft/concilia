@@ -12,6 +12,7 @@ import traceback
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Optional, Tuple
+from uuid import uuid4
 
 from litestar import post
 from litestar.response import Response
@@ -20,14 +21,8 @@ import pandas as pd
 from openpyxl import load_workbook
 
 from .agui_notify import emit
-from globalVar import AUTO_BOOTSTRAP_TENANCY, WORKSPACE_SLUG
-from services.db_pg import (
-    append_event as core_append_event,
-    close_run as core_close_run,
-    connect_db as core_connect_db,
-    create_run as core_create_run,
-    get_workspace_by_slug,
-)
+from services.ingest.sniff_bank import sniff_file
+from services.ingest.sicom_excel import load_sicom_workbook
 from urllib.parse import urlparse
 
 try:
@@ -36,6 +31,29 @@ except Exception:  # pragma: no cover
     pl = None
 
 logger = logging.getLogger(__name__)
+_OP_KEY_RE = re.compile(r"(\d+/\d{4})", re.IGNORECASE)
+_OP_MATCH_KEY_RE = re.compile(r"(\d+)(?:/\d{2,4})?", re.IGNORECASE)
+
+_CASE_BANK_ALIASES = {
+    "patagonia": "patagonia",
+    "banco_patagonia": "patagonia",
+    "patagonia_otros": "patagonia_otros",
+    "banco_pat_otros": "patagonia_otros",
+    "santander": "santander",
+    "banco_santander": "santander",
+    "santander_otros": "santander_otros",
+    "banco_sant_otros": "santander_otros",
+    "ciudad": "ciudad",
+    "banco_ciudad": "ciudad",
+}
+
+_CASE_BANK_TO_SICOM = {
+    "patagonia": {"banco_patagonia", "banco_pat_otros"},
+    "patagonia_otros": {"banco_pat_otros"},
+    "santander": {"banco_santander"},
+    "santander_otros": {"banco_sant_otros"},
+    "ciudad": {"banco_ciudad"},
+}
 
 # =========================
 # Helpers (IO) + cache
@@ -244,6 +262,403 @@ def _load_pilaga(path: Path) -> pd.DataFrame:
     return out
 
 
+def _load_sicom(path: Path) -> pd.DataFrame:
+    """
+    Lee un workbook mensual SICOM y consolida todas las solapas válidas en un único DF.
+    Devuelve un dataset canónico orientado a trazabilidad operativa y lotes bancarios.
+    """
+    cache_key = _df_cache_key("sicom", path)
+    if cache_key in _DF_CACHE:
+        return _DF_CACHE[cache_key].copy()
+
+    if path.suffix.lower() in {".parquet", ".pq"}:
+        if pl is not None:
+            df = pl.read_parquet(str(path)).to_pandas()
+        else:
+            df = pd.read_parquet(str(path))
+        if "fecha_pago" in df.columns:
+            df["fecha_pago"] = pd.to_datetime(df["fecha_pago"], errors="coerce")
+        _DF_CACHE[cache_key] = df.copy()
+        return df
+
+    out = load_sicom_workbook(path)
+    _DF_CACHE[cache_key] = out.copy()
+    return out
+
+
+def _normalize_case_bank(value: Any) -> str:
+    raw = str(value or "").strip().lower().replace(" ", "_")
+    return _CASE_BANK_ALIASES.get(raw, raw)
+
+
+def _normalize_account_scope(value: Any) -> str:
+    txt = str(value or "").strip().upper()
+    if not txt:
+        return ""
+    txt = re.sub(r"^(CC\s*\$|C/C|CTA\.?\s*CTE\.?|CUENTA\s*CORRIENTE)\s*", "", txt).strip()
+    digits = "".join(ch for ch in txt if ch.isdigit())
+    return digits or txt
+
+
+def _extract_op_key(value: Any) -> str:
+    txt = str(value or "").strip().upper()
+    if not txt:
+        return ""
+    match = _OP_KEY_RE.search(txt)
+    return match.group(1) if match else ""
+
+
+def _extract_op_match_key(value: Any) -> str:
+    txt = str(value or "").strip().upper()
+    if not txt:
+        return ""
+    match = _OP_MATCH_KEY_RE.search(txt)
+    return match.group(1) if match else ""
+
+
+def _resolve_sicom_bank_scopes(case_bank: str) -> set[str]:
+    normalized = _normalize_case_bank(case_bank)
+    if normalized in _CASE_BANK_TO_SICOM:
+        return set(_CASE_BANK_TO_SICOM[normalized])
+    if normalized.startswith("banco_"):
+        return {normalized}
+    return set()
+
+
+def _safe_pct(numerator: float, denominator: float) -> float:
+    if not denominator:
+        return 0.0
+    return round((float(numerator) / float(denominator)) * 100.0, 2)
+
+
+def _resolve_case_scope(
+    path_extracto: Path,
+    *,
+    bank_scope: str = "",
+    account_scope: str = "",
+) -> dict[str, Any]:
+    requested_bank = _normalize_case_bank(bank_scope)
+    requested_account_raw = str(account_scope or "").strip()
+
+    detected_bank = ""
+    detected_account_raw = ""
+    sniff_source = "none"
+
+    if path_extracto.suffix.lower() in {".xlsx", ".xls", ".xlsm", ".xltx", ".xltm"}:
+        sniffed = sniff_file(path_extracto)
+        detected = sniffed.get("detected") or {}
+        detected_bank = _normalize_case_bank(detected.get("bank"))
+        detected_account_raw = (
+            str(detected.get("account_full") or "").strip()
+            or str(detected.get("account_core_dv") or "").strip()
+        )
+        if detected_bank or detected_account_raw:
+            sniff_source = "extracto"
+
+    final_bank = requested_bank or detected_bank
+    final_account_raw = requested_account_raw or detected_account_raw
+
+    return {
+        "bank_scope": final_bank,
+        "account_scope_raw": final_account_raw,
+        "account_scope": _normalize_account_scope(final_account_raw),
+        "detected_bank_scope": detected_bank,
+        "detected_account_scope_raw": detected_account_raw,
+        "sicom_bank_scopes": sorted(_resolve_sicom_bank_scopes(final_bank)),
+        "bank_scope_source": "explicit" if requested_bank else sniff_source,
+        "account_scope_source": "explicit" if requested_account_raw else sniff_source,
+    }
+
+
+def _greedy_match_by_date_and_abs_amount(
+    df_left: pd.DataFrame,
+    *,
+    left_date_col: str,
+    left_amount_col: str,
+    df_right: pd.DataFrame,
+    right_date_col: str,
+    right_amount_col: str,
+) -> pd.DataFrame:
+    left = df_left.reset_index(drop=True).copy()
+    right = df_right.reset_index(drop=True).copy()
+    if left.empty or right.empty:
+        return pd.DataFrame()
+
+    left["_match_left_id"] = range(len(left))
+    right["_match_right_id"] = range(len(right))
+    left["_match_date"] = pd.to_datetime(left[left_date_col], errors="coerce").dt.normalize()
+    right["_match_date"] = pd.to_datetime(right[right_date_col], errors="coerce").dt.normalize()
+    left["_amount_abs_r"] = pd.to_numeric(left[left_amount_col], errors="coerce").fillna(0.0).abs().round(2)
+    right["_amount_abs_r"] = pd.to_numeric(right[right_amount_col], errors="coerce").fillna(0.0).abs().round(2)
+
+    merged = left.merge(right, on=["_match_date", "_amount_abs_r"], suffixes=("_left", "_right"))
+    merged = merged.sort_values(["_match_date", "_amount_abs_r", "_match_left_id", "_match_right_id"], kind="stable")
+
+    used_left: set[int] = set()
+    used_right: set[int] = set()
+    selected_rows: list[dict[str, Any]] = []
+    for record in merged.to_dict("records"):
+        left_id = int(record["_match_left_id"])
+        right_id = int(record["_match_right_id"])
+        if left_id in used_left or right_id in used_right:
+            continue
+        used_left.add(left_id)
+        used_right.add(right_id)
+        selected_rows.append(record)
+
+    return pd.DataFrame(selected_rows, columns=merged.columns) if selected_rows else merged.iloc[0:0].copy()
+
+
+def _greedy_match_pilaga_ops_with_sicom(df_pilaga: pd.DataFrame, df_sicom: pd.DataFrame) -> pd.DataFrame:
+    if df_pilaga.empty or df_sicom.empty:
+        return pd.DataFrame()
+
+    pilaga = df_pilaga.copy()
+    pilaga["op_key"] = pilaga["documento"].apply(_extract_op_match_key)
+    pilaga = pilaga[pilaga["op_key"] != ""].copy()
+    if pilaga.empty:
+        return pd.DataFrame()
+
+    pilaga["_match_p_id"] = range(len(pilaga))
+    pilaga["_amount_abs_r"] = pd.to_numeric(pilaga["monto"], errors="coerce").fillna(0.0).abs().round(2)
+    pilaga["fecha"] = pd.to_datetime(pilaga["fecha"], errors="coerce")
+
+    sicom = df_sicom.copy()
+    sicom["op_key"] = sicom["order_de_p"].apply(_extract_op_match_key)
+    sicom = sicom[sicom["op_key"] != ""].copy()
+    if sicom.empty:
+        return pd.DataFrame()
+
+    sicom["_match_s_id"] = range(len(sicom))
+    sicom["_amount_abs_r"] = pd.to_numeric(sicom["imp_neto"], errors="coerce").fillna(0.0).abs().round(2)
+    sicom["fecha_pago"] = pd.to_datetime(sicom["fecha_pago"], errors="coerce")
+
+    merged = pilaga.merge(
+        sicom,
+        left_on=["op_key", "_amount_abs_r"],
+        right_on=["op_key", "_amount_abs_r"],
+        suffixes=("_pilaga", "_sicom"),
+    )
+    if merged.empty:
+        return merged
+
+    merged["lag_days"] = (merged["fecha"] - merged["fecha_pago"]).abs().dt.days
+    merged = merged.sort_values(
+        ["_match_p_id", "lag_days", "_match_s_id"],
+        ascending=[True, True, True],
+        kind="stable",
+    )
+
+    used_p: set[int] = set()
+    used_s: set[int] = set()
+    selected_rows: list[dict[str, Any]] = []
+    for record in merged.to_dict("records"):
+        pilaga_id = int(record["_match_p_id"])
+        sicom_id = int(record["_match_s_id"])
+        if pilaga_id in used_p or sicom_id in used_s:
+            continue
+        used_p.add(pilaga_id)
+        used_s.add(sicom_id)
+        selected_rows.append(record)
+
+    return pd.DataFrame(selected_rows, columns=merged.columns) if selected_rows else merged.iloc[0:0].copy()
+
+
+def _lote_key_from_columns(fecha_value: Any, bank_scope: Any, nro_pago: Any) -> str:
+    fecha = pd.to_datetime(fecha_value, errors="coerce")
+    fecha_iso = fecha.date().isoformat() if pd.notna(fecha) else ""
+    return "|".join([fecha_iso, str(bank_scope or "").strip(), str(nro_pago or "").strip()])
+
+
+def _build_sicom_insights(
+    df_sicom: pd.DataFrame,
+    df_pilaga: pd.DataFrame,
+    df_banco: pd.DataFrame,
+    *,
+    bank_scope: str = "",
+    account_scope: str = "",
+    path_extracto: Optional[Path] = None,
+) -> dict[str, Any]:
+    if df_sicom is None or df_sicom.empty:
+        return {"used": False}
+
+    case_scope = _resolve_case_scope(
+        path_extracto or Path(""),
+        bank_scope=bank_scope,
+        account_scope=account_scope,
+    ) if path_extracto is not None else {
+        "bank_scope": _normalize_case_bank(bank_scope),
+        "account_scope_raw": str(account_scope or "").strip(),
+        "account_scope": _normalize_account_scope(account_scope),
+        "detected_bank_scope": "",
+        "detected_account_scope_raw": "",
+        "sicom_bank_scopes": sorted(_resolve_sicom_bank_scopes(bank_scope)),
+        "bank_scope_source": "explicit" if bank_scope else "none",
+        "account_scope_source": "explicit" if account_scope else "none",
+    }
+
+    sicom_bank_scopes = set(case_scope.get("sicom_bank_scopes") or [])
+    if sicom_bank_scopes:
+        scoped = df_sicom[df_sicom["bank_scope"].isin(sicom_bank_scopes)].copy()
+    else:
+        scoped = df_sicom.copy()
+
+    rel_total = df_sicom.loc[
+        (df_sicom["order_de_p"].astype(str).str.strip() != "") &
+        (df_sicom["nro_pago"].astype(str).str.strip() != ""),
+        ["order_de_p", "nro_pago"],
+    ].drop_duplicates()
+    rel_scoped = scoped.loc[
+        (scoped["order_de_p"].astype(str).str.strip() != "") &
+        (scoped["nro_pago"].astype(str).str.strip() != ""),
+        ["order_de_p", "nro_pago"],
+    ].drop_duplicates()
+
+    lotes = (
+        scoped.loc[scoped["nro_pago"].astype(str).str.strip() != ""]
+        .groupby(["fecha_pago", "bank_scope", "banco_raw", "nro_pago"], dropna=False)
+        .agg(
+            imp_neto=("imp_neto", "sum"),
+            rows=("nro_pago", "size"),
+            op_count=("order_de_p", lambda s: int(s.astype(str).str.strip().replace("", pd.NA).dropna().nunique())),
+        )
+        .reset_index()
+    )
+    lotes["lote_key"] = lotes.apply(
+        lambda row: _lote_key_from_columns(row["fecha_pago"], row["bank_scope"], row["nro_pago"]),
+        axis=1,
+    )
+    matched_lotes = _greedy_match_by_date_and_abs_amount(
+        lotes,
+        left_date_col="fecha_pago",
+        left_amount_col="imp_neto",
+        df_right=df_banco,
+        right_date_col="fecha",
+        right_amount_col="monto",
+    )
+
+    matched_ops = _greedy_match_pilaga_ops_with_sicom(df_pilaga, scoped)
+    matched_lote_keys = set(matched_lotes["lote_key"].astype(str)) if ("lote_key" in matched_lotes.columns and not matched_lotes.empty) else set()
+    final_ops = matched_ops[matched_ops["lote_key"].astype(str).isin(matched_lote_keys)].copy() if (not matched_ops.empty and matched_lote_keys) else matched_ops.iloc[0:0].copy()
+    effective_lote_keys = set(final_ops["lote_key"].astype(str)) if ("lote_key" in final_ops.columns and not final_ops.empty) else set()
+    effective_lotes = matched_lotes[matched_lotes["lote_key"].astype(str).isin(effective_lote_keys)].copy() if (not matched_lotes.empty and effective_lote_keys) else matched_lotes.iloc[0:0].copy()
+
+    bank_distribution = []
+    if not matched_ops.empty:
+        by_bank = (
+            matched_ops.groupby("banco_raw", dropna=False)
+            .agg(
+                count=("banco_raw", "size"),
+                amount=("imp_neto", lambda s: float(pd.to_numeric(s, errors="coerce").fillna(0.0).abs().sum())),
+            )
+            .reset_index()
+            .sort_values(["count", "banco_raw"], ascending=[False, True], kind="stable")
+        )
+        bank_distribution = [
+            {
+                "bank_raw": str(row["banco_raw"] or ""),
+                "count": int(row["count"]),
+                "amount": round(float(row["amount"] or 0.0), 2),
+            }
+            for _, row in by_bank.iterrows()
+        ]
+
+    lag_histogram = []
+    if not matched_ops.empty:
+        lag_counts = (
+            matched_ops["lag_days"]
+            .fillna(-1)
+            .astype(int)
+            .value_counts()
+            .sort_index()
+        )
+        lag_histogram = [
+            {"days": int(days), "count": int(count)}
+            for days, count in lag_counts.items()
+            if days >= 0
+        ]
+
+    banks_available = sorted({str(v).strip() for v in df_sicom["banco_raw"].astype(str).tolist() if str(v).strip()})
+    banks_scoped = sorted({str(v).strip() for v in scoped["banco_raw"].astype(str).tolist() if str(v).strip()})
+    matched_lotes_amount = float(pd.to_numeric(matched_lotes.get("imp_neto"), errors="coerce").fillna(0.0).abs().sum()) if not matched_lotes.empty else 0.0
+    total_lotes_amount = float(pd.to_numeric(lotes.get("imp_neto"), errors="coerce").fillna(0.0).abs().sum()) if not lotes.empty else 0.0
+    matched_ops_amount = float(pd.to_numeric(matched_ops.get("imp_neto"), errors="coerce").fillna(0.0).abs().sum()) if not matched_ops.empty else 0.0
+    final_ops_amount = float(pd.to_numeric(final_ops.get("imp_neto"), errors="coerce").fillna(0.0).abs().sum()) if not final_ops.empty else 0.0
+    effective_lotes_amount = float(pd.to_numeric(effective_lotes.get("imp_neto"), errors="coerce").fillna(0.0).abs().sum()) if not effective_lotes.empty else 0.0
+    matched_ops_key_col = next(
+        (col for col in ("op_key", "op_key_pilaga", "op_key_left") if col in matched_ops.columns),
+        "",
+    )
+    final_ops_key_col = next(
+        (col for col in ("op_key", "op_key_pilaga", "op_key_left") if col in final_ops.columns),
+        "",
+    )
+    final_banks = []
+    if not final_ops.empty:
+        final_banks = sorted({str(v).strip() for v in final_ops["banco_raw"].astype(str).tolist() if str(v).strip()})
+
+    return {
+        "used": True,
+        "scope": {
+            "bank_scope": case_scope.get("bank_scope") or None,
+            "bank_scope_source": case_scope.get("bank_scope_source"),
+            "account_scope_raw": case_scope.get("account_scope_raw") or None,
+            "account_scope": case_scope.get("account_scope") or None,
+            "account_scope_source": case_scope.get("account_scope_source"),
+            "sicom_bank_scopes": list(case_scope.get("sicom_bank_scopes") or []),
+            "scope_applied": bool(sicom_bank_scopes),
+        },
+        "source": {
+            "rows_total": int(len(df_sicom)),
+            "rows_scoped": int(len(scoped)),
+            "rows_excluded": int(len(df_sicom) - len(scoped)),
+            "period_from": df_sicom["fecha_pago"].min().date().isoformat() if len(df_sicom) and pd.notna(df_sicom["fecha_pago"].min()) else None,
+            "period_to": df_sicom["fecha_pago"].max().date().isoformat() if len(df_sicom) and pd.notna(df_sicom["fecha_pago"].max()) else None,
+            "banks_available": banks_available,
+            "banks_scoped": banks_scoped,
+            "op_count_total": int(df_sicom.loc[df_sicom["order_de_p"].astype(str).str.strip() != "", "order_de_p"].nunique()),
+            "op_count_scoped": int(scoped.loc[scoped["order_de_p"].astype(str).str.strip() != "", "order_de_p"].nunique()),
+            "nro_pago_count_total": int(df_sicom.loc[df_sicom["nro_pago"].astype(str).str.strip() != "", "nro_pago"].nunique()),
+            "nro_pago_count_scoped": int(scoped.loc[scoped["nro_pago"].astype(str).str.strip() != "", "nro_pago"].nunique()),
+            "lote_count_scoped": int(len(lotes)),
+        },
+        "traceability": {
+            "op_multi_lote_count_total": int((rel_total.groupby("order_de_p")["nro_pago"].nunique() > 1).sum()) if len(rel_total) else 0,
+            "lote_multi_op_count_total": int((rel_total.groupby("nro_pago")["order_de_p"].nunique() > 1).sum()) if len(rel_total) else 0,
+            "op_multi_lote_count_scoped": int((rel_scoped.groupby("order_de_p")["nro_pago"].nunique() > 1).sum()) if len(rel_scoped) else 0,
+            "lote_multi_op_count_scoped": int((rel_scoped.groupby("nro_pago")["order_de_p"].nunique() > 1).sum()) if len(rel_scoped) else 0,
+        },
+        "extracto_coverage": {
+            "matched_lotes": int(len(matched_lotes)),
+            "total_lotes": int(len(lotes)),
+            "matched_amount": round(matched_lotes_amount, 2),
+            "total_amount": round(total_lotes_amount, 2),
+            "coverage_count_pct": _safe_pct(len(matched_lotes), len(lotes)),
+            "coverage_amount_pct": _safe_pct(matched_lotes_amount, total_lotes_amount),
+        },
+        "pilaga_coverage": {
+            "matched_rows": int(len(matched_ops)),
+            "matched_unique_ops": int(matched_ops[matched_ops_key_col].nunique()) if (not matched_ops.empty and matched_ops_key_col) else 0,
+            "matched_amount": round(matched_ops_amount, 2),
+            "lag_days_histogram": lag_histogram,
+            "bank_distribution": bank_distribution,
+        },
+        "final_reconciliation": {
+            "pilaga_rows_with_extracto": int(len(final_ops)),
+            "pilaga_unique_ops_with_extracto": int(final_ops[final_ops_key_col].nunique()) if (not final_ops.empty and final_ops_key_col) else 0,
+            "pilaga_amount_with_extracto": round(final_ops_amount, 2),
+            "extracto_lotes_with_contable_support": int(len(effective_lotes)),
+            "extracto_amount_with_contable_support": round(effective_lotes_amount, 2),
+            "shared_lote_count": int(len(effective_lote_keys)),
+            "banks_in_final_reconciliation": final_banks,
+            "pilaga_rows_traced_only": int(max(len(matched_ops) - len(final_ops), 0)),
+            "pilaga_amount_traced_only": round(max(matched_ops_amount - final_ops_amount, 0.0), 2),
+            "extracto_lotes_only_sicom": int(max(len(matched_lotes) - len(effective_lotes), 0)),
+            "extracto_amount_only_sicom": round(max(matched_lotes_amount - effective_lotes_amount, 0.0), 2),
+        },
+    }
+
+
 def _get_extracto_saldos(path: Path) -> Tuple[Optional[float], Optional[float]]:
     """Lee saldos inicial/final del extracto sin alterar el loader principal."""
     try:
@@ -259,6 +674,8 @@ def _get_extracto_saldos(path: Path) -> Tuple[Optional[float], Optional[float]]:
         saldo_inicial = None
         saldo_final = None
         for row in ws.iter_rows(values_only=True):
+            if not row:
+                continue
             first = row[0]
             if isinstance(first, str) and "SALDO INICIAL" in first.upper():
                 saldo_inicial = _parse_money_value(row[1])
@@ -286,6 +703,8 @@ def _get_pilaga_saldos(path: Path) -> Tuple[Optional[float], Optional[float]]:
         saldo_inicial = None
         saldo_final = None
         for row in ws.iter_rows(values_only=True):
+            if not row:
+                continue
             first = row[0]
             if not isinstance(first, str):
                 continue
@@ -470,6 +889,7 @@ _RECONCILE_STAGES = [
     {"name": "PREPARE_INPUTS", "label": "Preparando entradas", "weight": 2},
     {"name": "LOAD_EXTRACTO", "label": "Cargando extracto", "weight": 18},
     {"name": "LOAD_CONTABLE", "label": "Cargando contable", "weight": 18},
+    {"name": "LOAD_SICOM", "label": "Cargando SICOM", "weight": 10},
     {"name": "NORMALIZE", "label": "Normalizando", "weight": 8},
     {"name": "MATCH_1_1", "label": "Conciliando 1→1", "weight": 16},
     {"name": "SUMMARY", "label": "Resumen", "weight": 10},
@@ -490,81 +910,9 @@ async def reconcile_start(request: Any) -> Response:
       - {type:"RUN_START", ...}
       - {type:"RESULTS_READY", payload:{summary, counts}}
     """
-    core_conn = None
-    core_run_id = None
-    workspace_id = None
-    workspace_slug = WORKSPACE_SLUG
     run_id = None
     stage_started: dict[str, float] = {}
     thread_id = None
-
-    async def _bootstrap_workspace(conn: Any, slug: str) -> str:
-        if "-" in slug:
-            client_slug, product_slug = slug.split("-", 1)
-        else:
-            client_slug = slug
-            product_slug = slug
-
-        client_id = await conn.fetchval(
-            "SELECT client_id FROM core_clients WHERE slug = $1",
-            client_slug,
-        )
-        if not client_id:
-            client_id = await conn.fetchval(
-                """
-                INSERT INTO core_clients (slug, name)
-                VALUES ($1, $2)
-                ON CONFLICT (slug) DO UPDATE
-                  SET name = EXCLUDED.name
-                RETURNING client_id
-                """,
-                client_slug,
-                client_slug,
-            )
-        if not client_id:
-            raise RuntimeError(f"Bootstrap failed for core_clients slug={client_slug}")
-
-        product_id = await conn.fetchval(
-            "SELECT product_id FROM core_products WHERE slug = $1",
-            product_slug,
-        )
-        if not product_id:
-            product_id = await conn.fetchval(
-                """
-                INSERT INTO core_products (slug, name)
-                VALUES ($1, $2)
-                ON CONFLICT (slug) DO UPDATE
-                  SET name = EXCLUDED.name
-                RETURNING product_id
-                """,
-                product_slug,
-                product_slug,
-            )
-        if not product_id:
-            raise RuntimeError(f"Bootstrap failed for core_products slug={product_slug}")
-
-        workspace_id = await conn.fetchval(
-            "SELECT workspace_id FROM core_workspaces WHERE slug = $1",
-            slug,
-        )
-        if not workspace_id:
-            workspace_id = await conn.fetchval(
-                """
-                INSERT INTO core_workspaces (slug, name, client_id, product_id)
-                VALUES ($1, $2, $3, $4)
-                ON CONFLICT (slug) DO UPDATE
-                  SET name = EXCLUDED.name
-                RETURNING workspace_id
-                """,
-                slug,
-                slug,
-                client_id,
-                product_id,
-            )
-        if not workspace_id:
-            raise RuntimeError(f"Bootstrap failed for core_workspaces slug={slug}")
-
-        return str(workspace_id)
 
     async def _emit_event(payload: dict[str, Any]) -> None:
         if thread_id:
@@ -589,20 +937,6 @@ async def reconcile_start(request: Any) -> Response:
             },
         }
         await _emit_event(payload)
-        if core_conn and core_run_id and workspace_id:
-            await core_append_event(
-                core_conn,
-                workspace_id=workspace_id,
-                run_id=core_run_id,
-                type="STAGE",
-                payload={
-                    "stage": stage,
-                    "status": status,
-                    "message": message,
-                    "timing_ms": timing_ms,
-                    "metrics": metrics,
-                },
-            )
 
     try:
         form = await request.form()
@@ -611,41 +945,17 @@ async def reconcile_start(request: Any) -> Response:
         # Nueva versión usa uri_extracto / uri_contable. Aceptamos ambos.
         uri_extracto = form.get("extracto_original_uri") or form.get("uri_extracto") or ""
         uri_contable = form.get("contable_original_uri") or form.get("uri_contable") or ""
+        uri_sicom = form.get("sicom_original_uri") or form.get("uri_sicom") or ""
+        bank_scope = str(form.get("bank_scope") or "").strip()
+        account_scope = str(form.get("account_scope") or "").strip()
         days_window = int(form.get("days_window") or 5)
 
         if not uri_extracto or not uri_contable:
             return Response({"ok": False, "message": "Faltan URIs: uri_extracto y uri_contable son obligatorios."}, status_code=400)
 
-        # Core-only run initialization
-        # Long-running reconcile can scan 12 months, give DB time to finish.
-        core_conn = await core_connect_db(
-            connect_timeout=20.0,
-            connect_retries=3,
-            connect_retry_backoff=1.0,
-            statement_timeout_ms=300000,
-        )
-        try:
-            workspace_id = await get_workspace_by_slug(core_conn, workspace_slug)
-        except ValueError:
-            if AUTO_BOOTSTRAP_TENANCY:
-                workspace_id = await _bootstrap_workspace(core_conn, workspace_slug)
-            else:
-                return Response(
-                    {"ok": False, "message": f"Workspace no existe: {workspace_slug}"},
-                    status_code=400,
-                )
-        core_run_id = await core_create_run(
-            core_conn,
-            workspace_id=workspace_id,
-            kind="concilia_reconcile",
-            params={
-                "thread_id": thread_id,
-                "uri_extracto": uri_extracto,
-                "uri_contable": uri_contable,
-                "days_window": days_window,
-            },
-        )
-        run_id = core_run_id
+        run_id = str(uuid4())
+        from backend.http.audit import audit_temporary
+        await audit_temporary(request, 'reconcile_compute_start', run_id)
 
         await _emit_event({
             "type": "RUN_START",
@@ -658,6 +968,7 @@ async def reconcile_start(request: Any) -> Response:
 
         path_extracto = _from_file_uri(uri_extracto)
         path_contable = _from_file_uri(uri_contable)
+        path_sicom = _from_file_uri(uri_sicom) if uri_sicom else None
 
         # 1) Cargar
         await _emit_stage("PREPARE_INPUTS", "start", "Validando entradas…")
@@ -679,6 +990,19 @@ async def reconcile_start(request: Any) -> Response:
             timing_ms=int((time.monotonic() - stage_started["LOAD_CONTABLE"]) * 1000),
             metrics={"rows": len(df_pilaga)},
         )
+
+        df_sicom: pd.DataFrame | None = None
+        if path_sicom is not None:
+            await _emit_stage("LOAD_SICOM", "start", "Cargando SICOM…")
+            stage_started["LOAD_SICOM"] = time.monotonic()
+            df_sicom = _load_sicom(path_sicom)
+            await _emit_stage(
+                "LOAD_SICOM",
+                "done",
+                "SICOM cargado.",
+                timing_ms=int((time.monotonic() - stage_started["LOAD_SICOM"]) * 1000),
+                metrics={"rows": len(df_sicom)},
+            )
 
         await _emit_stage("LOAD_EXTRACTO", "start", "Cargando extracto…")
         stage_started["LOAD_EXTRACTO"] = time.monotonic()
@@ -729,6 +1053,15 @@ async def reconcile_start(request: Any) -> Response:
             "no_en_pilaga": no_en_pilaga,  # están en banco pero no en PILAGA
             "days_window": days_window,
         }
+        if df_sicom is not None:
+            summary["sicom"] = _build_sicom_insights(
+                df_sicom,
+                df_pilaga,
+                df_banco,
+                bank_scope=bank_scope,
+                account_scope=account_scope,
+                path_extracto=path_extracto,
+            )
 
         await _emit_stage(
             "SUMMARY",
@@ -740,16 +1073,6 @@ async def reconcile_start(request: Any) -> Response:
 
         await _emit_stage("FINALIZE", "start", "Finalizando…")
         stage_started["FINALIZE"] = time.monotonic()
-        if core_conn and core_run_id and workspace_id:
-            try:
-                await core_close_run(
-                    core_conn,
-                    workspace_id=workspace_id,
-                    run_id=core_run_id,
-                    status="done",
-                )
-            except Exception as e:
-                print(f"[reconcile_start][core] close_run error: {type(e).__name__}: {e}", flush=True)
         await _emit_stage(
             "FINALIZE",
             "done",
@@ -765,23 +1088,26 @@ async def reconcile_start(request: Any) -> Response:
             },
         })
 
-        return Response({"ok": True, "summary": summary}, status_code=200)
+        await audit_temporary(request, 'reconcile_compute_complete', run_id)
+        return Response({"ok": True, "summary": summary, "persistence": "temporary"}, status_code=200)
 
     except TimeoutError as e:
+        from backend.http.audit import audit_temporary
+        await audit_temporary(request, 'reconcile_compute_error', run_id, 'FAILURE', 'timeout; no durable decision')
         tb = traceback.format_exc(limit=8)
-        logger.exception("reconcile_start db timeout")
+        logger.exception("reconcile_start timeout")
         print("[reconcile_start] ERROR:", type(e).__name__, str(e), flush=True)
         print(tb, flush=True)
         if thread_id:
             await _emit_event({
                 "type": "TOAST",
                 "level": "error",
-                "message": "Timeout conectando a la base de datos.",
+                "message": "Timeout durante la conciliación.",
             })
         return Response(
             {
                 "ok": False,
-                "message": "Timeout conectando a la base de datos",
+                "message": "Timeout durante la conciliación",
                 "error": f"{type(e).__name__}: {e}",
                 "trace": tb,
                 "where": "reconcile_start",
@@ -789,31 +1115,23 @@ async def reconcile_start(request: Any) -> Response:
             status_code=503,
         )
     except Exception as e:
+        from backend.http.audit import audit_temporary
+        await audit_temporary(request, 'reconcile_compute_error', run_id, 'FAILURE', 'computation failed; no durable decision')
         tb = traceback.format_exc(limit=12)
         logger.exception("reconcile_start error")
         print("[reconcile_start] ERROR:", type(e).__name__, str(e), flush=True)
         print(tb, flush=True)
-        if core_conn and core_run_id and workspace_id:
-            try:
-                await _emit_stage(
-                    "FINALIZE",
-                    "error",
-                    f"{type(e).__name__}: {e}",
-                )
-            except Exception as stage_err:
-                print(
-                    f"[reconcile_start][core] error stage failed: {type(stage_err).__name__}: {stage_err}",
-                    flush=True,
-                )
-            try:
-                await core_close_run(
-                    core_conn,
-                    workspace_id=workspace_id,
-                    run_id=core_run_id,
-                    status="error",
-                )
-            except Exception as close_err:
-                print(f"[reconcile_start][core] close_run error: {type(close_err).__name__}: {close_err}", flush=True)
+        try:
+            await _emit_stage(
+                "FINALIZE",
+                "error",
+                f"{type(e).__name__}: {e}",
+            )
+        except Exception as stage_err:
+            print(
+                f"[reconcile_start] error stage failed: {type(stage_err).__name__}: {stage_err}",
+                flush=True,
+            )
         if thread_id:
             await _emit_event({
                 "type": "TOAST",
@@ -830,6 +1148,3 @@ async def reconcile_start(request: Any) -> Response:
             },
             status_code=500,
         )
-    finally:
-        if core_conn:
-            await core_conn.close()
